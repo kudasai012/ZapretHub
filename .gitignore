@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- данные приложения ---
+data/config.json
+data/components.json
+data/logs/
+data/backups/
+data/tmp/
+data/hub.lock
+components/
+installer/
+
+# --- сборка ---
+build/
+dist/
+*.spec.bak
+ZapretHub.spec
+build_exe.bat
+build_installer.bat
+
+# --- прочее ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

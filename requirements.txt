@@ -1,0 +1,10 @@
+# Zapret Hub - зависимости
+# Python 3.10+ (протестировано на 3.11/3.13)
+#
+# Установка:  pip install -r requirements.txt
+# Сборка exe: build_exe.bat
+
+PySide6>=6.6,<7
+
+# Для сборки одного exe-файла (необязательно для запуска из исходников):
+# pyinstaller>=6.10
