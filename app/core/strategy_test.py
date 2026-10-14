@@ -23,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QThread, Signal
 
@@ -37,15 +37,23 @@ from .probe import (
     PROTO_HTTP11,
     PROTO_TLS12,
     PROTO_TLS13,
+    TCP_FALLBACK_PORTS,
     HttpResult,
     http_probe,
     ping_probe,
+    tcp_probe,
 )
 
 # на каждый протокол — по одному запросу, ровно как в test zapret.ps1
 ATTEMPTS = 1
 PROBE_TIMEOUT = 3.0            # как -m 4 в curl из test zapret.ps1
 SETTLE_SECONDS = 2.5
+
+# Стратегия не дожила до замера: процесс умер сразу после старта. Это не
+# «нет ответа» — цель просто не с чем сравнивать, и в отчёте такая строка
+# должна быть видна отдельно, а не выглядеть как плохая стратегия. Значение —
+# стабильный токен, а не текст: переводится уже в интерфейсе.
+DEAD_PROCESS_ERROR = "winws_not_started"
 # сколько сайтов проверяем одновременно внутри одной стратегии: цели
 # независимы, а ждать их по очереди — минуты на каждый general*.bat
 MAX_WORKERS = 8
@@ -126,6 +134,13 @@ def parse_targets(lines: Sequence[str]) -> List[Target]:
     А также простые записи: ``discord.com``, ``discord.com:8443``,
     ``https://host``, ``PING:1.1.1.1``.
     """
+    # Строку разбиваем на строки. ``str`` — это тоже ``Sequence[str]``,
+    # только из символов: без разбивки ``for raw in lines`` перебирает
+    # текст по буквам, каждая буква становится «целью» с хостом из одного
+    # символа, и весь замер честно получает «нет ответа» по всем сайтам.
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+
     targets: List[Target] = []
     seen: set = set()
     for raw in lines:
@@ -209,15 +224,23 @@ class TargetOutcome:
 
     target: Target
     http: Dict[str, HttpResult] = field(default_factory=dict)
-    ping: Optional[float] = None          # мс ответа, None — таймаут
+    ping: Optional[float] = None          # мс ответа ICMP, None — молчит
     # цель молчала дольше TARGET_BUDGET: оставшиеся проверки не делали
     timed_out: bool = False
+    # ping молчал, но хост принял TCP-соединение: значит ICMP режут,
+    # а сам хост жив. Для целей PING:адрес — это и есть «доступен»
+    ping_blocked: bool = False
+    # время установки TCP-соединения для ping_blocked: в замер задержки
+    # сайтов не идёт — это не время ответа, а только признак живости
+    tcp_ms: Optional[float] = None
 
     @property
     def ok(self) -> bool:
         """Цель доступна, если ответил хотя бы один протокол или ping."""
-        return any(result.ok for result in self.http.values()) or (
-            self.ping is not None
+        return (
+            any(result.ok for result in self.http.values())
+            or self.ping is not None
+            or self.ping_blocked
         )
 
     @property
@@ -237,13 +260,25 @@ class TargetOutcome:
         ]
 
     def summary(self) -> str:
-        """Короткая строка вида «HTTP/1.1: 200 · TLS 1.3: нет ответа · ping: 12 мс»."""
+        """Короткая строка вида «HTTP/1.1: 200 · TLS 1.3: нет ответа · ping: 12 мс».
+
+        Для целей ``PING:адрес`` тут только ping. Раньше при молчащем ICMP
+        возвращалась пустая строка — в журнаре появлялась строкa «имя — »
+        вообще без объяснения, и это выглядело как поломка диагностики.
+        """
         parts: List[str] = []
         for name, result in self.protocols():
             if result is not None:
                 parts.append(f"{name}: {result.text}")
         if self.ping is not None:
             parts.append(f"{PING_LABEL}: {self.ping:.0f} мс")
+        elif self.ping_blocked:
+            took = f" за {self.tcp_ms:.0f} мс" if self.tcp_ms is not None else ""
+            parts.append(
+                f"{PING_LABEL}: ICMP не ответил, порт открыт{took}"
+            )
+        elif self.target.kind == "ping":
+            parts.append(f"{PING_LABEL}: нет ответа")
         return " · ".join(parts)
 
 
@@ -333,7 +368,16 @@ class StrategyResult:
                     states.append("slow")
                 else:
                     states.append("ok")
-            states.append("ok" if outcome.ping is not None else "fail")
+            # ICMP мог не ответить, но сайт ответил по HTTPS — цель всё
+            # равно доступна, поэтому отрезок графика не красный
+            site_ok = any(
+                result is not None and result.ok for _, result in outcome.protocols()
+            )
+            states.append(
+                "ok"
+                if (outcome.ping is not None or outcome.ping_blocked or site_ok)
+                else "fail"
+            )
         return states
 
     @property
@@ -350,12 +394,20 @@ class StrategyResult:
         return round(100.0 * good / len(states))
 
     def summary(self) -> str:
+        """Короткая подпись к результату для журнала.
+
+        Раньше при ``ok == 0`` здесь возвращался литерал «нет доступа» —
+        ровно та фраза, которую пользователь видел в каждой строке
+        диагностики и не понимал, что дело в правах, а не в стратегиях.
+        Причина называется в UI (``StrategyRow._failure_reason``), а тут
+        остаётся только честное «сайты не ответили».
+        """
         if self.error:
             return self.error
         if not self.total:
             return "—"
         if self.ok == 0:
-            return "нет доступа"
+            return "сайты не ответили"
         average = self.average or 0.0
         if self.site_count:
             return (
@@ -378,6 +430,7 @@ class StrategyTester(QThread):
         settle: float = SETTLE_SECONDS,
         timeout: float = PROBE_TIMEOUT,
         ping_timeout: int = PING_TIMEOUT_MS,
+        alive: Optional[Callable[[], bool]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -387,6 +440,10 @@ class StrategyTester(QThread):
         self._settle = max(0.0, float(settle))
         self._timeout = max(0.2, float(timeout))
         self._ping_timeout = max(100, int(ping_timeout))
+        # проверка, что winws.exe действительно дожил до замера. Без неё
+        # стратегия, которая упала сразу после старта (гонка WinDivert при
+        # быстрой смене стратегий), выглядела как «нет ответа» у всех целей
+        self._alive = alive
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -409,6 +466,20 @@ class StrategyTester(QThread):
                     outcome.ping = ping_probe(
                         target.host, min(self._ping_timeout, MAX_CHECK_MS)
                     )
+            if outcome.ping is None:
+                # ICMP молчит. Это ещё не значит, что хост недоступен:
+                # провайдеры и брандмауэры режут ping, а сайт работает.
+                # Пробуем TCP — если порт открылся, хост доступен.
+                for port in TCP_FALLBACK_PORTS:
+                    if self._cancelled:
+                        break
+                    took = tcp_probe(
+                        target.host, port, min(self._timeout, TARGET_BUDGET)
+                    )
+                    if took is not None:
+                        outcome.ping_blocked = True
+                        outcome.tcp_ms = took
+                        break
             return outcome
         secure = target.scheme == "https"
         variants = HTTP_VARIANTS if secure else ((PROTO_HTTP11, None),)
@@ -472,6 +543,21 @@ class StrategyTester(QThread):
                 break
             time.sleep(0.05)
 
+        # Стратегия могла не запуститься вовсе: winws.exe умирает при запуске,
+        # если предыдущая копия ещё не отпустила фильтр WinDivert (гонка при
+        # быстрой смене стратегий) или не смог прочитать свои файлы. Раньше
+        # замер шёл всё равно, каждая цель честно получала «нет ответа», и в
+        # отчёте это выглядело как плохая стратегия, хотя её просто нет.
+        if not self._cancelled and self._alive is not None:
+            if not self._alive():
+                result.error = DEAD_PROCESS_ERROR
+                self.log.emit(
+                    f"[{self.name}] процесс не дожил до замера — "
+                    "замер пропущен"
+                )
+                self.measured.emit(result)
+                return
+
         for outcome in self._measure(self._targets):
             if self._cancelled:
                 break
@@ -496,18 +582,45 @@ class StrategyTester(QThread):
                     f"[test] {self.name}: {target.label} — {name} "
                     f"{http.text}{note}"
                 )
-            if outcome.ping is not None:
+            if outcome.ping is not None or outcome.ping_blocked:
                 result.ok += 1
                 result.sites[key] += 1
-                self.log.emit(
-                    f"[test] {self.name}: {target.label} — "
-                    f"{PING_LABEL} {outcome.ping:.0f} мс"
-                )
+                if outcome.ping_blocked:
+                    # ICMP не ответил, но порт открылся: хост доступен,
+                    # просто пинг режут. Отдельной строкой, чтобы в журнале
+                    # было видно — это не «нет ответа», а «жив, но без ping»
+                    took = outcome.tcp_ms
+                    when = f" за {took:.0f} мс" if took is not None else ""
+                    self.log.emit(
+                        f"[test] {self.name}: {target.label} — {PING_LABEL} "
+                        f"не ответил, порт открыт{when} (ICMP заблокирован, "
+                        f"хост доступен)"
+                    )
+                else:
+                    self.log.emit(
+                        f"[test] {self.name}: {target.label} — "
+                        f"{PING_LABEL} {outcome.ping:.0f} мс"
+                    )
             else:
-                result.fail += 1
-                self.log.emit(
-                    f"[test] {self.name}: {target.label} — {PING_LABEL} нет ответа"
+                # ping не ответил. Если сайт и так ответил по HTTPS, это
+                # не провал цели — просто ICMP режут. Раньше здесь всегда
+                # писалось «нет ответа» и шло в счёт отказов, из-за чего
+                # работающая стратегия выглядела сломанной.
+                site_answered = any(
+                    http is not None and http.status == OK
+                    for _, http in outcome.protocols()
                 )
+                if site_answered:
+                    self.log.emit(
+                        f"[test] {self.name}: {target.label} — {PING_LABEL} "
+                        f"ICMP не ответил (сайт ответил по HTTPS)"
+                    )
+                else:
+                    result.fail += 1
+                    self.log.emit(
+                        f"[test] {self.name}: {target.label} — "
+                        f"{PING_LABEL} нет ответа"
+                    )
             # в общий замер задержки идёт самая быстрая успешная проверка
             # цели, иначе ping и HTTP одного сайта считались бы дважды
             latency = outcome.latency

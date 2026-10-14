@@ -25,12 +25,14 @@ if __package__ in (None, ""):
 # ------------------------------------------------------------ инициализация путей
 
 from . import paths
+from . import crashlog
+
+# ловим аварии до всего остального: при запуске из pythonw.exe (run.bat,
+# собранный exe) консоли нет, и без этого любая ошибка невидима
+crashlog.install()
 
 
 def _setup_logging() -> logging.Logger:
-    if paths.migrate_portable_data():
-        # данные лежали рядом с прежней сборкой — перенесли в профиль
-        print("[hub] данные перенесены в " + str(paths.DATA_ROOT))
     paths.ensure_dirs()
     logger = logging.getLogger("zapret_hub")
     logger.setLevel(logging.INFO)
@@ -191,13 +193,18 @@ def _components_to_start(ctx) -> tuple[bool, bool]:
 
 
 def _needs_admin(ctx) -> bool:
-    """Админ нужен, если при старте планируется запуск zapret."""
+    """Права администратора нужны всегда.
+
+    zapret (`winws.exe`) работает через WinDivert и без прав администратора
+    не запускается, а данные лежат в папке программы — в `Program Files`
+    без повышения тоже не записать. Отдельной настройки нет: программа
+    просто предлагает перезапуск с повышением.
+    """
     from .core import win32
 
     if not win32.IS_WINDOWS or win32.is_admin():
         return False
-    zapret, _ = _components_to_start(ctx)
-    return zapret
+    return True
 
 
 def _offer_elevation(ctx) -> bool:
@@ -263,6 +270,17 @@ def main(argv: list[str] | None = None) -> int:
     qt_app.setQuitOnLastWindowClosed(False)
     _apply_app_icon(qt_app)
 
+    # маркер «меня закрывает установщик» живёт в %TEMP% и переживает любую
+    # перезагрузку. Если программа записала его и была снята задачей (или
+    # упала) до чтения, маркер остаётся лежать — и следующий запуск считает,
+    # что его закрывает установщик: окно уходило молча и гасило обходы.
+    try:
+        from .core import win32
+
+        win32.drop_stale_quit_request()
+    except Exception:
+        pass
+
     ctx = AppContext()
     set_language(ctx.config.general.language)
     qt_app.setStyleSheet(theme.stylesheet())
@@ -297,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
             interval = ctx.config.updates.interval_hours * 3600
             if last == 0.0 or time.time() - last >= interval:
                 window.background_check_updates()
+            # версия самой программы проверяется отдельно от компонентов
+            window.background_check_app_update()
 
         QTimer.singleShot(2500, _auto_check)
 

@@ -21,6 +21,11 @@ class GeneralSettings:
     start_minimized: bool = False   # стартовать свёрнутым (без --tray)
     sidebar_collapsed: bool = False # боковое меню свёрнуто в иконки
     check_updates_on_start: bool = True
+    # гасить ли обходы при выходе из программы. По умолчанию нет: zapret и
+    # TG WS Proxy продолжают работать, пока их не остановят явно — как
+    # обычные .bat-файлы. При обновлении через установщик программа
+    # останавливает их принудительно, чтобы файлы не были заняты.
+    stop_components_on_quit: bool = False
 
 
 @dataclass
@@ -29,7 +34,8 @@ class AutostartSettings:
     start_zapret: bool = True
     start_tgws: bool = True
     delay_seconds: int = 0
-    elevated: bool = True           # перезапуск с повышением прав при старте
+    # настройки «запускать от имени администратора» нет: права повышаются
+    # всегда, иначе zapret (WinDivert) просто не стартует
 
 
 @dataclass

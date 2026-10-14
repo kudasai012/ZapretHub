@@ -35,6 +35,9 @@ STATUS_CRASHED = "crashed"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 2
 
+# отвязать ребёнка от job-объекта Hub (см. ManagedProcess._spawn)
+BREAKAWAY_FROM_JOB = 0x01000000
+
 # как часто переснимаем дерево процессов, пока компонент работает
 TREE_REFRESH_MS = 500
 # сколько ждём, пока процессы по имени образа actually умрут
@@ -118,6 +121,14 @@ class ManagedProcess(QObject):
         self._tree_lock = threading.Lock()
         self._tree_stop = threading.Event()
         self._tree_thread: Optional[threading.Thread] = None
+        # «сырой» файл вывода: компонент пишет в него сам, а Hub только
+        # читает. Раньше вывод шёл в pipe, и когда Hub убивали, читающий
+        # конец исчезал — компонент получал ERROR_BROKEN_PIPE на каждой
+        # записи в stdout. Для winws.exe это не страшно, а для TgWsProxy
+        # могло обернуться падением. Файл от Hub не зависит вообще.
+        self.raw_log: Optional[Path] = None
+        self._tail_stop = threading.Event()
+        self._tail_thread: Optional[threading.Thread] = None
         self._desktop_handle: Optional[int] = None
         # авто-перезапуск уходит в поток интерфейса через сигнал
         self.restart_requested.connect(self._schedule_restart)
@@ -199,31 +210,45 @@ class ManagedProcess(QObject):
                 startupinfo.dwFlags |= 0x00000001  # STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = 0  # SW_HIDE
 
+        # отдельный файл вместо pipe: компонент пишет вывод сам и больше
+        # никак от Hub не зависит. Hub лишь подглядывает в файл, чтобы
+        # показывать строки в интерфейсе.
+        raw = Path(self._writer.path).parent / (self.key + ".out.log")
+        self.raw_log = raw
+        raw_handle = None
         try:
-            self._proc = subprocess.Popen(
-                [str(self.exe)] + self.args,
-                cwd=str(self.cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                creationflags=creationflags,
-                startupinfo=startupinfo,
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-            )
-        except Exception as exc:
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            raw_handle = open(raw, "wb")
+        except OSError:
+            raw_handle = None
+
+        try:
+            self._proc = self._spawn(raw_handle, creationflags, startupinfo, env)
+        except Exception as exc:  # noqa: BLE001 - файла нет, нет прав, job
             self.log_line.emit(f"[hub] failed to start: {exc}")
             self._proc = None
+        if self._proc is None:
+            if raw_handle is not None:
+                try:
+                    raw_handle.close()
+                except OSError:
+                    pass
             self._set_status(STATUS_CRASHED)
             return False
+
+        # копию дескриптора в родителе закрываем: у ребёнка своя, и файл
+        # остаётся открытым у него даже после смерти Hub
+        if raw_handle is not None:
+            try:
+                raw_handle.close()
+            except OSError:
+                pass
 
         self._stopping = False
         self.started_at = time.time()
         self.exit_code = None
         self._tree_stop.clear()
+        self._tail_stop.clear()
         self._tree = [self.pid]
         self._tree_thread = threading.Thread(target=self._watch_tree, daemon=True)
         self._tree_thread.start()
@@ -235,14 +260,117 @@ class ManagedProcess(QObject):
                 f"«{self.desktop_name}» — в трее его иконки нет"
             )
 
-        for stream, name in ((self._proc.stdout, "out"),):
-            t = threading.Thread(target=self._reader, args=(stream, name), daemon=True)
+        if raw_handle is not None or self._proc.stdout is None:
+            t = threading.Thread(target=self._tail, daemon=True)
+            t.start()
+            self._threads.append(t)
+            self._tail_thread = t
+        else:
+            # файл открыть не удалось — читаем pipe как раньше
+            t = threading.Thread(
+                target=self._reader, args=(self._proc.stdout, "out"), daemon=True
+            )
             t.start()
             self._threads.append(t)
         t = threading.Thread(target=self._monitor, daemon=True)
         t.start()
         self._threads.append(t)
         return True
+
+    def _spawn(self, raw_handle, creationflags, startupinfo, env):
+        """Создаёт процесс компонента.
+
+        Вывод идёт в файл (`raw_handle`), а не в pipe: pipe привязывал бы
+        компонент к Hub — стоит Hub умереть, и читающий конец исчезает.
+
+        `CREATE_BREAKAWAY_FROM_JOB` отвязывает ребёнка от job-объекта Hub:
+        некоторые среды (Citrix, AppLocker, песочницы) кладут процесс в job,
+        и тогда вместе с Hub гасли бы и обходы. Флаг требует, чтобы job
+        разрешал breakaway, иначе CreateProcess падает — поэтому сначала
+        пробуем с флагом, а если не вышло, без него.
+        """
+        if win32.IS_WINDOWS and raw_handle is not None:
+            try:
+                return subprocess.Popen(
+                    [str(self.exe)] + self.args,
+                    cwd=str(self.cwd),
+                    stdout=raw_handle,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creationflags | BREAKAWAY_FROM_JOB,
+                    startupinfo=startupinfo,
+                    env=env,
+                )
+            except Exception:
+                # job не разрешил breakaway — запускаем как раньше
+                pass
+        return subprocess.Popen(
+            [str(self.exe)] + self.args,
+            cwd=str(self.cwd),
+            stdout=raw_handle if raw_handle is not None else subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
+            env=env,
+            text=raw_handle is None,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    def _tail(self) -> None:
+        """Читает «сырой» файл вывода компонента и отдаёт строки в UI.
+
+        Файл открывает и пишет сам компонент, поэтому этот поток ничего не
+        держит: если Hub умрёт, компонент продолжит писать в файл, а вместе
+        с ним продолжит работать и обход.
+        """
+        if self.raw_log is None:
+            return
+        pos = 0
+        pending = b""
+        while not self._tail_stop.wait(0.25):
+            pos, pending = self._drain(pos, pending)
+        # финальный добор: процесс уже умер, файл дописан до конца
+        self._drain(pos, pending)
+
+    def _drain(self, pos: int, pending: bytes):
+        """Читает новые байты из файла вывода. Возвращает (позиция, остаток)."""
+        try:
+            if not self.raw_log.exists():
+                return pos, pending
+            size = self.raw_log.stat().st_size
+            if size < pos:
+                # файл обрезали — начинаем сначала
+                pos = 0
+                pending = b""
+            if size == pos:
+                return pos, pending
+            with open(self.raw_log, "rb") as f:
+                f.seek(pos)
+                chunk = f.read(size - pos)
+            pos = size
+        except OSError:
+            return pos, pending
+        if not chunk:
+            return pos, pending
+        pending += chunk
+        while b"\n" in pending:
+            raw_line, _, pending = pending.partition(b"\n")
+            text = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+            if text:
+                self._writer.write(f"{time.strftime('%H:%M:%S')} {text}\n")
+                self.log_line.emit(text)
+        return pos, pending
+
+    def _stop_tail(self) -> None:
+        self._tail_stop.set()
+        thread = self._tail_thread
+        self._tail_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            # поток просыпается каждые 0.25 c, секунды хватает с запасом;
+            # дольше ждать нельзя — stop() вызывается из потока интерфейса
+            thread.join(timeout=1.0)
 
     def _watch_tree(self) -> None:
         """Переснимает дерево процессов — onefile-ребёнок появляется не сразу.
@@ -297,6 +425,7 @@ class ManagedProcess(QObject):
         self.exit_code = self._proc.poll()
         was_stopping = self._stopping
         self._stop_tree_watch()
+        self._stop_tail()
         self._set_status(STATUS_STOPPED if was_stopping else STATUS_CRASHED)
         self.log_line.emit(f"[hub] process exited with code {self.exit_code}")
         self.exited.emit(self.exit_code)
@@ -337,6 +466,7 @@ class ManagedProcess(QObject):
         proc = self._proc
         self._stopping = True
         self._stop_tree_watch()
+        self._stop_tail()
         if proc is None:
             self._set_status(STATUS_STOPPED)
             return

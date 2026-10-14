@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 venv/
 
+# --- скачанные компоненты (их тянет само приложение, в репозиторий не нужны) ---
+components/
+
 # --- данные приложения ---
 data/config.json
 data/components.json
@@ -12,7 +15,11 @@ data/logs/
 data/backups/
 data/tmp/
 data/hub.lock
-components/
+
+# --- личное: сборка остаётся на машине автора ---
+# в репозиторий идут только исходники, exe и установщик — через Releases
+build_exe.bat
+build_installer.bat
 installer/
 
 # --- сборка ---
@@ -20,11 +27,16 @@ build/
 dist/
 *.spec.bak
 ZapretHub.spec
-build_exe.bat
-build_installer.bat
+
+# --- аварийные журналы (пишет app/crashlog.py) ---
+crash.log
+logs/*.out.log
 
 # --- прочее ---
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# --- превью README (генерируется tools/preview_readme.py) ---
+docs/readme-preview.html

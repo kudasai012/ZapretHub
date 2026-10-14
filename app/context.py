@@ -1,4 +1,4 @@
-"""Контекст приложения: конфиг + компоненты + менеджер обновлений."""
+"""Контекст приложения: конфиг + компоненты + менеджеры обновлений."""
 from __future__ import annotations
 
 from typing import Optional
@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal
 
 from . import paths
 from .config import AppConfig
+from .core.app_update import AppUpdater
 from .core.asn import AsnCollector
 from .core.tgws import TgWsComponent
 from .core.updater import Updater
@@ -27,6 +28,7 @@ class AppContext(QObject):
         self.zapret = ZapretComponent(self.config)
         self.tgws = TgWsComponent(self.config)
         self.updater = Updater(self.config)
+        self.app_updater = AppUpdater(self)
         self.asn = AsnCollector(self.config)
 
     # ------------------------------------------------------------ управление
@@ -64,10 +66,23 @@ class AppContext(QObject):
     def components_installed(self) -> bool:
         return self.zapret.installed() or self.tgws.installed()
 
-    def shutdown(self) -> None:
+    def shutdown(self, stop_components: bool = False) -> None:
+        """Завершение работы программы.
+
+        По умолчанию компоненты **не** останавливаются: обход блокировок
+        должен продолжать работать после закрытия окна — именно так же, как
+        если бы человек запустил `general.bat` вручную. Раньше здесь всегда
+        вызывался `stop_all()`, и закрытие программы (или снятие задачи в
+        диспетчере) гасило winws.exe и TgWsProxy вместе с окном.
+
+        Остановить компоненты обязательно нужно, когда программу закрывает
+        установщик: иначе файлы в `Program Files` останутся занятыми и
+        обновление не встанет. Этот случай передаёт `stop_components=True`.
+        """
         self.asn.stop()
-        self.stop_all()
-        self._sweep_orphans()
+        if stop_components:
+            self.stop_all()
+            self._sweep_orphans()
 
     def _sweep_orphans(self) -> None:
         """Добивает процессы компонентов, оставшиеся после остановки.

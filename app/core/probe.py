@@ -45,6 +45,9 @@ HTTP_VARIANTS: Tuple[Tuple[str, Optional[str]], ...] = (
 PING_LABEL = "ping"
 PING_TIMEOUT_MS = 1000        # как Ping.Send(host, 1000) в test zapret.ps1
 DEFAULT_HTTP_TIMEOUT = 3.0    # как -m 4 в curl из test zapret.ps1
+# порты, которыми проверяем доступность хоста, когда ICMP не ответил:
+# провайдер или брандмауэр режут ping, но сайт при этом открывается
+TCP_FALLBACK_PORTS: Tuple[int, ...] = (443, 80)
 # жёсткий предел одной проверки: ответ дольше уже не считается ответом.
 # Браузер пользователя к этому моменту давно показал бы ошибку, поэтому
 # такая проверка идёт в отказ как «нет ответа».
@@ -215,3 +218,42 @@ def ping_probe(host: str, timeout_ms: int = PING_TIMEOUT_MS) -> Optional[float]:
         # ответили, но время не распознали — берём общее время вызова
         value = (time.perf_counter() - start) * 1000.0
     return value if value <= MAX_CHECK_MS else None
+
+
+def tcp_probe(
+    host: str, port: int = 443, timeout: float = 2.0
+) -> Optional[float]:
+    """Время установки TCP-соединения или None, если хост не принял.
+
+    Нужен как запасной признак «хост жив» для целей ``PING:адрес``:
+    ICMP режут провайдеры и брандмауэры, при этом сам сайт открывается
+    нормально. Поэтому молчащий ping — ещё не доказательство, что хост
+    недоступен; сперва пробуем TCP.
+    """
+    start = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=max(0.2, timeout)):
+            elapsed = (time.perf_counter() - start) * 1000.0
+            return elapsed if elapsed <= MAX_CHECK_MS else None
+    except (OSError, socket.timeout, TimeoutError):
+        return None
+
+
+def reachable(
+    host: str,
+    timeout_ms: int = PING_TIMEOUT_MS,
+    ports: Tuple[int, ...] = TCP_FALLBACK_PORTS,
+) -> Tuple[Optional[float], bool]:
+    """Доступен ли хост: (время отклика, ответил ли ICMP).
+
+    Сначала ping. Если молчит — пробуем TCP на типовых портах: хост,
+    который принял соединение, доступен, даже если пинг режут.
+    """
+    value = ping_probe(host, timeout_ms)
+    if value is not None:
+        return value, True
+    for port in ports:
+        value = tcp_probe(host, port, timeout_ms / 1000.0)
+        if value is not None:
+            return value, False
+    return None, False

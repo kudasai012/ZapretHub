@@ -40,7 +40,7 @@ class ComponentsPage(BasePage):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        self.update_all_button = IconButton("refresh", tr("upd.check_all"), "ghost")
+        self.update_all_button = IconButton("refresh", tr("upd.check_all"), "glass")
         self.update_all_button.clicked.connect(self._update_all)
         actions.addWidget(self.update_all_button)
         self.add_layout(actions)

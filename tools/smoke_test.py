@@ -76,6 +76,7 @@ def main() -> int:
     pages = (
         window.home_page,
         window.components_page,
+        window.diagnostics_page,
         window.settings_page,
     )
     for index, page in enumerate(pages):
@@ -88,6 +89,10 @@ def main() -> int:
         panel.refresh_status()
         panel.on_show()
         check(f"panel {type(panel).__name__} renders", True)
+        # сворачивание панели до заголовка и обратно
+        panel.set_collapsed(True)
+        panel.set_collapsed(False)
+    check("component panel collapse", True)
 
     from app.ui.update_dialog import UpdateDialog
 
@@ -95,6 +100,56 @@ def main() -> int:
     dialog.show()
     check("update dialog renders", dialog._rows)
     dialog.close()
+
+    # --- новое в 1.0.2 ---
+    from app.ui.app_update_dialog import AppUpdateDialog
+
+    app_dialog = AppUpdateDialog(ctx, parent=window)
+    app_dialog.show()
+    check("app update dialog renders", app_dialog.notes is not None)
+    app_dialog.close()
+
+    # полукруг статуса: все состояния должны переживать перекраску
+    arc = window.state_arc
+    for state in ((0, 2, False, False), (1, 2, True, False), (2, 2, True, True)):
+        arc.set_state(*state)
+        arc.set_compact(False)
+        arc.set_compact(True)
+        arc.repaint()
+    check("status arc paints", True)
+
+    # кликабельные подпись и иконка бокового меню
+    check("sidebar title clickable", window.brand_title.clicked is not None)
+    check("sidebar icon clickable", window.brand_icon.clicked is not None)
+
+    # свои чекбоксы
+    from app.ui.widgets import PickCheckBox
+
+    box = PickCheckBox("тест")
+    box.setChecked(True)
+    box.repaint()
+    box.setChecked(False)
+    box.repaint()
+    check("PickCheckBox paints", True)
+
+    # диагностика: сетка, выбор, раскрытие
+    diag = window.diagnostics_page
+    diag.reload()
+    # в тестовом окружении zapret не установлен, поэтому стратегий может
+    # не быть — проверяем, что reload не падает, а не количество
+    check("diagnostics reload", isinstance(diag._order, list))
+    diag._set_all_picked(False)
+    check("diagnostics pick none", not diag._picked_names())
+    diag._set_all_picked(True)
+    check("diagnostics pick all", len(diag._picked_names()) == len(diag._order))
+    if diag._order:
+        row = diag._rows[diag._order[0]]
+        row.set_expanded(True)
+        row.set_expanded(False)
+    check("diagnostics card expand", True)
+    diag._toggle_targets(True)
+    diag._toggle_targets(False)
+    check("diagnostics targets toggle", True)
 
     # статусы компонентов (не установлены в тестовом окружении)
     check("zapret not installed in sandbox", not ctx.zapret.installed())

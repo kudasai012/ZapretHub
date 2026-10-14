@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QRadialGradient,
+    QRegion,
 )
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -37,6 +38,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QStyle,
+    QStyleOptionButton,
     QVBoxLayout,
     QWidget,
 )
@@ -68,6 +71,18 @@ class IconButton(QPushButton):
         self.setIconSize(QSize(icon_size, icon_size))
         if not text:
             self.setFixedSize(icon_size + 14, icon_size + 14)
+        else:
+            # Кнопка с подписью: раньше ширину иногда задавали вручную
+            # (например 38x38 у «Закрыть»), и текст не влезал — кнопка
+            # выглядела обрезанной. Здесь минимальная ширина считается по
+            # содержимому, поэтому подпись всегда помещается.
+            # запас: padding 16+16 из QSS + рамка 2 + ещё 34 на «воздух».
+            # Раньше запаса хватало только на padding, и подпись
+            # обрезалась — «Закрыть» выглядела как «Закры…».
+            fm = QFontMetrics(self.font())
+            need = fm.horizontalAdvance(text) + icon_size + 52
+            self.setMinimumWidth(max(need, 72))
+            self.setMinimumHeight(max(icon_size + 22, 34))
         self.setToolTip(tooltip or text)
 
     def set_icon(self, icon_name: str, color: Optional[str] = None) -> None:
@@ -78,6 +93,203 @@ class IconButton(QPushButton):
 
 
 # ------------------------------------------------------------ список выбора
+
+class PickCheckBox(QCheckBox):
+    """Чекбокс с квадратным индикатором и нарисованной галочкой.
+
+    Индикатор — **штатный**, а не саморисованный. Раньше квадрат рисовался
+    вручную по координате x=0, а настоящий индикатор прятался нулевым
+    размером. Отсюда шли обе жалобы: квадрат был виден, но щёлчок по нему
+    не срабатывал (срабатывал только щёлчок по подписи), и квадрат уезжал
+    под текст, выглядел обрезанным. Штатный индикатор стилизуется через
+    QSS, поэтому всегда на своём месте, правильного размера и кликабельный.
+
+    Галочку дорисовываем поверх: в QSS картинку подставить нечем (Qt не
+    умеет data:-URI), а белая галочка на синей заливке читается лучше
+    любого системного значка. Геометрию индикатора спрашиваем у стиля —
+    так галочка попадает ровно в квадрат при любом размере шрифта.
+    """
+
+    #: сторона квадратика — должна совпадать с QSS (width/height)
+    SIZE = 17
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.PointingHandCursor)
+        # свойство для QSS: правила применяются ко всем таким чекбоксам,
+        # но не трогают прочие QCheckBox, если они появятся
+        self.setProperty("check", "yes")
+        self._hover = False
+
+    # --- геометрия ---
+
+    def _indicator_rect(self) -> QRectF:
+        """Прямоугольник штатного индикатора в координатах виджета."""
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        rect = self.style().subElementRect(
+            QStyle.SE_CheckBoxIndicator, option, self
+        )
+        return QRectF(rect)
+
+    # --- мышь ---
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def hitButton(self, pos) -> bool:
+        """Щелчок по самому квадрату тоже переключает чекбокс.
+
+        Штатный индикатор и так кликабельный, но на всякий случай
+        добавляем его прямоугольник: подпись остаётся кликабельной целиком.
+        """
+        if self._indicator_rect().contains(QPointF(pos)):
+            return True
+        return super().hitButton(pos)
+
+    # --- рисование ---
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        rect = self._indicator_rect()
+        if rect.width() < 4 or rect.height() < 4:
+            # индикатор ещё не размечен (виджет скрыт или только создан)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        palette = theme.PALETTE
+        cx, cy = rect.center().x(), rect.center().y()
+        size = rect.width()
+        # галочка занимает примерно половину квадрата
+        s = size * 0.30
+
+        if self.isChecked():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(
+                QColor("#ffffff") if self.isEnabled() else QColor(palette["faint"])
+            )
+            path = QPainterPath()
+            path.moveTo(cx - s, cy + s * 0.05)
+            path.lineTo(cx - s * 0.15, cy + s * 0.85)
+            path.lineTo(cx + s * 1.05, cy - s * 0.85)
+            path.lineTo(cx + s * 0.62, cy - s * 0.95)
+            path.lineTo(cx - s * 0.15, cy + s * 0.15)
+            path.lineTo(cx - s * 0.45, cy + s * 0.45)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif self.checkState() == Qt.PartiallyChecked:
+            # смешанное состояние — короткая черточка
+            pen = QPen(QColor(palette["accent_hover"]))
+            pen.setWidthF(1.8)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(
+                QPointF(rect.left() + size * 0.28, cy),
+                QPointF(rect.right() - size * 0.28, cy),
+            )
+        painter.end()
+
+
+class ClickLabel(QLabel):
+    """Метка, по которой можно щёлкнуть.
+
+    Нужна в боковом меню: подпись с названием программы и иконка
+    сворачивают/разворачивают панель так же, как маленькая кнопка-шеврон.
+    """
+
+    clicked = Signal()
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class StatusDot(QFrame):
+    """Статус обходов в боковом меню: точка и подпись.
+
+    Раньше здесь был полукруг с тремя пузырьками по кромке. На широкой
+    панели он всё равно не помещался: окружность уходила за виджет,
+    обрезалась по нижней кромке, и вместо купола были видны только бледное
+    пятно да пара кругов по бокам. Пользователю от него нужна одна вещь —
+    работает обход или нет, — поэтому осталось ровно это: зелёная точка и
+    «Активен», когда хоть один компонент запущен, серая точка и «Не
+    активен», когда всё выключено. Разбор по компонентам — в подсказке.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusDot")
+        self.setProperty("on", "no")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(10)
+
+        self.dot = QFrame()
+        self.dot.setObjectName("StatusDotMark")
+        self.dot.setProperty("on", "no")
+        self.dot.setFixedSize(10, 10)
+        layout.addWidget(self.dot, 0, Qt.AlignVCenter)
+
+        self.label = QLabel(tr("status.inactive"))
+        self.label.setObjectName("StatusDotText")
+        layout.addWidget(self.label, 1)
+
+        self._running = 0
+        self._total = 2
+        self._zapret = False
+        self._tgws = False
+        self._refresh()
+
+    # --- данные ---
+
+    def set_state(self, running: int, total: int, zapret: bool, tgws: bool) -> None:
+        running = max(0, int(running))
+        total = max(0, int(total))
+        if (running, total, bool(zapret), bool(tgws)) == (
+            self._running,
+            self._total,
+            self._zapret,
+            self._tgws,
+        ):
+            return
+        self._running = running
+        self._total = total
+        self._zapret = bool(zapret)
+        self._tgws = bool(tgws)
+        self._refresh()
+
+    def set_compact(self, compact: bool) -> None:
+        """Свёрнутое меню: подпись не помещается, остаётся одна точка."""
+        self.label.setVisible(not compact)
+        self._refresh()
+
+    # --- рисование состояния ---
+
+    def _refresh(self) -> None:
+        on = self._running > 0
+        self.setProperty("on", "yes" if on else "no")
+        self.dot.setProperty("on", "yes" if on else "no")
+        self.label.setText(tr("status.active") if on else tr("status.inactive"))
+        for widget in (self, self.dot, self.label):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
 
 class PickComboBox(QComboBox):
     """Комбобокс, который меняет значение только по клику.
@@ -92,8 +304,41 @@ class PickComboBox(QComboBox):
     ARROW_IDLE = QColor("#8b96ad")
     ARROW_ACTIVE = QColor("#eaeef7")
 
+    #: радиус скругления выпадающего списка — должен совпадать с QSS
+    POPUP_RADIUS = 13
+
     def wheelEvent(self, event) -> None:
         event.ignore()
+
+    def showPopup(self) -> None:
+        """Показывает список и скругляет углы самого окна-поппапа.
+
+        Выпадающий список комбо — отдельное окно Windows. У него
+        прямоугольная рамка, поэтому скруглённая по QSS рамка списка
+        «упиралась» углами в квадратный фон окна: видны были светлые
+        треугольники. Здесь popup получает ту же скруглённую маску,
+        что и диалог обновлений.
+        """
+        super().showPopup()
+        self._round_popup()
+
+    def _round_popup(self, attempt: int = 0) -> None:
+        """Ставит маску на окно-поппап (с повтором: размер известен не сразу)."""
+        view = self.view()
+        if view is None:
+            return
+        window = view.window()
+        if window is None or window is self:
+            return
+        rect = window.rect()
+        if not rect.isValid() or rect.width() < 20:
+            # размер ещё не посчитан — пробуем ещё раз на следующем тике
+            if attempt < 5:
+                QTimer.singleShot(0, lambda: self._round_popup(attempt + 1))
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), self.POPUP_RADIUS, self.POPUP_RADIUS)
+        window.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -675,10 +920,10 @@ class BypassButton(QFrame):
         super().mouseReleaseEvent(event)
 
 
-# ------------------------------------------------------------ статус-точка
+# ------------------------------------------------------------ точка состояния
 
-class StatusDot(QWidget):
-    """Анимированный индикатор состояния."""
+class StatusLed(QWidget):
+    """Анимированный индикатор состояния (точка у статус-пилюли)."""
 
     def __init__(self, size: int = 13, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -765,7 +1010,7 @@ class StatusRow(QFrame):
         layout.setContentsMargins(16, 12, 14, 12)
         layout.setSpacing(14)
 
-        self.dot = StatusDot(13)
+        self.dot = StatusLed(13)
         layout.addWidget(self.dot, 0, Qt.AlignVCenter)
 
         icon_label = QLabel()
@@ -1008,7 +1253,9 @@ class HintLabel(QLabel):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        self.setObjectName("muted")
+        # раньше здесь был objectName «muted» — подсказки выходили ярче и крупнее,
+        # чем задумано правилом QLabel#hintLabel ($faint, 9pt). Оно оставалось мёртвым.
+        self.setObjectName("hintLabel")
         self.setWordWrap(True)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 

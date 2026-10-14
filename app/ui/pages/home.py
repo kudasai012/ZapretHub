@@ -21,6 +21,7 @@ from ..widgets import (
     IconButton,
     MasterButton,
     SectionLabel,
+    show_toast,
 )
 from .base import BasePage
 
@@ -94,7 +95,7 @@ class HomePage(BasePage):
 
         # --- подсказки ---
         self.not_installed_banner = Banner(tr("dash.not_installed_text"), "warning")
-        goto_button = IconButton("layers", tr("dash.goto_components"), "primary")
+        goto_button = IconButton("layers", tr("dash.goto_components"), "glassPrimary")
         goto_button.clicked.connect(lambda: self.goto_components.emit(""))
         self.not_installed_banner.layout().addWidget(goto_button)
         self.add(self.not_installed_banner)
@@ -104,12 +105,12 @@ class HomePage(BasePage):
         actions.setSpacing(6)
         actions.addWidget(SectionLabel(tr("dash.quick_actions")))
         actions.addStretch(1)
-        open_components = IconButton("layers", tr("dash.open_components"), "ghost")
+        open_components = IconButton("layers", tr("dash.open_components"), "glass")
         open_components.clicked.connect(
-            lambda: paths.open_in_file_manager(paths.COMPONENTS_DIR)
+            lambda: self._open_folder(paths.COMPONENTS_DIR)
         )
-        open_logs = IconButton("folder", tr("dash.open_logs"), "ghost")
-        open_logs.clicked.connect(lambda: paths.open_in_file_manager(paths.LOGS_DIR))
+        open_logs = IconButton("folder", tr("dash.open_logs"), "glass")
+        open_logs.clicked.connect(lambda: self._open_folder(paths.LOGS_DIR))
         actions.addWidget(open_components)
         actions.addWidget(open_logs)
         self.add_layout(actions)
@@ -164,6 +165,16 @@ class HomePage(BasePage):
         component.start()
 
     # ------------------------------------------------------------ статус
+
+    def _open_folder(self, path) -> None:
+        """Открыть папку в проводнике; если не вышло — сказать об этом."""
+        if not paths.open_in_file_manager(path):
+            show_toast(
+                self.window(),
+                tr("set.folder_failed", path=str(path)),
+                "error",
+                duration=6000,
+            )
 
     def refresh_status(self) -> None:
         zapret, tgws = self.ctx.zapret, self.ctx.tgws

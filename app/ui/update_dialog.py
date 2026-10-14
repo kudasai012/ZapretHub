@@ -36,6 +36,11 @@ class UpdateDialog(QDialog):
         self._drag_offset = None
         self._checking = False
         self._elapsed = 0
+        # компоненты, которые скачиваются прямо сейчас: пока они в наборе,
+        # кнопка «Установить» должна оставаться выключенной — иначе во
+        # время скачивания двух компонентов она снова включалась после
+        # первого, и установленный компонент можно было скачать повторно
+        self._installing: set = set()
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(1000)
         self._watchdog.timeout.connect(self._on_watchdog)
@@ -62,7 +67,16 @@ class UpdateDialog(QDialog):
         title.setObjectName("h2")
         head.addWidget(title)
         head.addStretch(1)
-        close = IconButton("close", tr("action.close"))
+        # кнопка закрытия — красная: она же «закрыть», и её должно быть
+        # видно, что это не обычная кнопка подтверждения
+        close = IconButton("close", tr("action.close"), "glassDanger")
+        # ширина по содержимому: с фиксированными 38x38 подпись «Закрыть»
+        # не влезала и кнопка выглядела обрезанной. Ровно та же беда была с
+        # жёстко заданными 96 px — они меньше, чем нужно под «Закрыть»
+        # (текст ~58 px + значок 16 + отступы 34), поэтому ширину теперь
+        # целиком считает IconButton, а здесь только высота.
+        close.setMinimumHeight(38)
+        close.setToolTip(tr("action.close"))
         close.clicked.connect(self.reject)
         head.addWidget(close)
         outer.addLayout(head)
@@ -127,10 +141,13 @@ class UpdateDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         buttons.addStretch(1)
-        self.check_button = IconButton("refresh", tr("upd.check"), "ghost")
+        # тот же «стеклянный» стиль, что в настройках и в окне обновления
+        # самой программы: раньше здесь оставались прозрачные ghost и
+        # glassAccent, и кнопки выбивались из общего вида
+        self.check_button = IconButton("refresh", tr("upd.check"), "glass")
         self.check_button.clicked.connect(lambda: self.check() if not self._checking else None)
         buttons.addWidget(self.check_button)
-        self.install_button = IconButton("download", tr("upd.install"), "glassAccent")
+        self.install_button = IconButton("download", tr("upd.install"), "glassPrimary")
         self.install_button.setEnabled(False)
         self.install_button.clicked.connect(self._install)
         buttons.addWidget(self.install_button)
@@ -246,9 +263,15 @@ class UpdateDialog(QDialog):
                 row["state"].setText(tr("upd.update_available"))
             else:
                 row["state"].setText(tr("upd.up_to_date"))
-            if info.release and not info.error and (info.update_available or info.not_installed):
+            if (
+                info.release
+                and not info.error
+                and (info.update_available or info.not_installed)
+                and info.component not in self._installing
+            ):
                 pending.append(info)
-        self.install_button.setEnabled(bool(pending))
+        # кнопка включается только когда есть что ставить И ничего не ставится
+        self.install_button.setEnabled(bool(pending) and not self._installing)
         self.ctx.config.updates.last_check = time.time()
         self.ctx.save_config()
 
@@ -267,11 +290,15 @@ class UpdateDialog(QDialog):
     # ------------------------------------------------------------ установка
 
     def _install(self) -> None:
+        if self._installing:
+            # уже что-то качаем — второй запуск не начинаем
+            return
         targets = [
             info
             for info in self.infos
             if info.release
             and (info.update_available or info.not_installed)
+            and info.component not in self._installing
             and (not self.key or info.component == self.key)
         ]
         if not targets:
@@ -291,10 +318,21 @@ class UpdateDialog(QDialog):
             self.banner.set_kind("success")
             self.banner.set_text(tr("upd.done"))
             self.progress.setVisible(False)
-            self.install_button.setEnabled(True)
+            self._installing.clear()
             self.check_button.setEnabled(True)
+            # что осталось ставить — считаем по последней проверке, чтобы
+            # не гонять лишний запрос к GitHub
+            pending = [
+                info
+                for info in self.infos
+                if info.release
+                and (info.update_available or info.not_installed)
+                and (not self.key or info.component == self.key)
+            ]
+            self.install_button.setEnabled(bool(pending))
             return
         info = self._queue.pop(0)
+        self._installing.add(info.component)
         was_running = (
             self.ctx.zapret.is_running()
             if info.component == "zapret"
@@ -307,6 +345,7 @@ class UpdateDialog(QDialog):
             component.stop()
 
         def on_done(ok: bool, message: str) -> None:
+            self._installing.discard(info.component)
             if ok:
                 self.banner.set_kind("success")
                 self.banner.set_text(

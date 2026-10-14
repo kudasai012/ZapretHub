@@ -144,6 +144,12 @@ def _i_pause(p):
     _line(p, 15, 5.5, 15, 18.5)
 
 
+def _i_skip_forward(p):
+    """Треугольник «вперёд» плюс планка — «пропустить эту стратегию»."""
+    _polygon(p, [(4.5, 5.5), (13.5, 12), (4.5, 18.5)], fill=True)
+    _line(p, 17.5, 5.5, 17.5, 18.5)
+
+
 def _i_folder(p):
     _polygon(p, [(3, 6.5), (9.5, 6.5), (11.8, 9.2), (21, 9.2), (21, 19.5), (3, 19.5)])
 
@@ -283,8 +289,22 @@ def _i_chevron_right(p):
     _polygon(p, [(9.5, 4.5), (17.5, 12), (9.5, 19.5)])
 
 
+def _i_chevron_up(p):
+    _polygon(p, [(4.5, 14.5), (12, 6.5), (19.5, 14.5)])
+
+
 def _i_chevron_down(p):
     _polygon(p, [(4.5, 9.5), (12, 17.5), (19.5, 9.5)])
+
+
+def _i_triangle_up(p):
+    """Закрашенный треугольник остриём вверх."""
+    _polygon(p, [(12, 4.5), (19.5, 17.5), (4.5, 17.5)], fill=True)
+
+
+def _i_triangle_down(p):
+    """Закрашенный треугольник остриём вниз."""
+    _polygon(p, [(4.5, 6.5), (19.5, 6.5), (12, 19.5)], fill=True)
 
 
 ICONS = {
@@ -299,11 +319,13 @@ ICONS = {
     "stop": _i_square,
     "play": _i_play,
     "pause": _i_pause,
+    "skip-forward": _i_skip_forward,
     "folder": _i_folder,
     "layers": _i_layers,
     "copy": _i_copy,
     "external": _i_external,
     "check": _i_check,
+    "square": _i_square,
     "check-square": _i_check_square,
     "check-circle": _i_check_circle,
     "alert": _i_alert,
@@ -325,6 +347,9 @@ ICONS = {
     "chevron-left": _i_chevron_left,
     "chevron-right": _i_chevron_right,
     "chevron-down": _i_chevron_down,
+    "chevron-up": _i_chevron_up,
+    "triangle-up": _i_triangle_up,
+    "triangle-down": _i_triangle_down,
 }
 
 

@@ -552,10 +552,60 @@ QUIT_REQUEST_FILE = QUIT_REQUEST_DIR / "quit-request"
 
 
 def quit_requested() -> bool:
-    """True — установщик просит закрыться, спрашивать пользователя не надо."""
+    """True — установщик просит закрыться, спрашивать пользователя не надо.
+
+    Маркер **одноразовый**: прочитали — удалили. Иначе получалась вот
+    такая ловушка: программа один раз записала маркер (обновление,
+    удаление) и после этого закрывалась молча **всегда** — а вместе с
+    молчаливым закрытием гасила и обходы. Установщику маркера хватает
+    одного прочтения: он ставит его ровно перед тем, как послать WM_CLOSE.
+    """
     try:
-        return QUIT_REQUEST_FILE.exists()
+        if not QUIT_REQUEST_FILE.exists():
+            return False
     except OSError:
+        return False
+    clear_quit_request()
+    return True
+
+
+def request_quit() -> None:
+    """Создаёт маркер закрытия.
+
+    Нужен, когда программу закрывает сама себя — например, кнопка
+    «Удалить программу» запускает `unins000.exe` или установщик новой
+    версии. Тогда окно закроется без вопроса «Выйти?», даже если
+    компоненты работают.
+    """
+    try:
+        QUIT_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+        QUIT_REQUEST_FILE.write_text("quit", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def launch_installer(path) -> bool:
+    """Запускает установщик (или любой exe) от имени администратора.
+
+    True — получилось. Через ShellExecute: установщик сам попросит
+    повышение прав через UAC, поэтому программе не нужно знать, elevated
+    она или нет.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return False
+    try:
+        if IS_WINDOWS:
+            import ctypes
+
+            result = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", str(path), None, str(path.parent), 1
+            )
+            # ShellExecute возвращает код ошибки, а не bool
+            return int(result) > 32
+        subprocess.Popen([str(path)])
+        return True
+    except Exception:  # noqa: BLE001 - UAC могли отклонить
         return False
 
 
@@ -565,6 +615,18 @@ def clear_quit_request() -> None:
         QUIT_REQUEST_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def drop_stale_quit_request() -> None:
+    """Убирает маркер, оставшийся от прошлого запуска.
+
+    Маркер живёт в `%TEMP%`, а не в папке программы, поэтому он переживает
+    любую перезагрузку. Если программа когда-то записала его и была снята
+    задачей (или упала) до того, как прочитать, маркер остаётся лежать —
+    и следующий запуск считает, что его закрывает установщик. Вызывается
+    один раз на старте, до создания окна.
+    """
+    clear_quit_request()
 
 
 # ---------------------------------------------------------------- автозапуск
@@ -710,6 +772,45 @@ def remove_service(name: str) -> bool:
     except Exception:
         ok = False
     return ok
+
+
+def stop_service(name: str, timeout: float = 30.0) -> bool:
+    """Останавливает службу Windows, не удаляя её. True — получилось.
+
+    Нужно диагностике: пакет zapret-discord-youtube штатно ставит winws.exe
+    службой (``service.bat``), а служба и standalone-запуск не уживаются —
+    свой же ``service.bat`` в этом случае пишет «use service.bat and choose
+    Remove Services first if you want to run standalone bat». Поэтому перед
+    перебором стратегий службу надо погасить, а после — вернуть.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        subprocess.run(
+            ["net", "stop", name],
+            capture_output=True,
+            creationflags=CREATE_NO_WINDOW,
+            timeout=timeout,
+        )
+    except Exception:
+        return False
+    return query_service(name) in (None, "STOPPED", "STOP_PENDING")
+
+
+def start_service(name: str, timeout: float = 30.0) -> bool:
+    """Запускает остановленную службу Windows. True — получилось."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        subprocess.run(
+            ["net", "start", name],
+            capture_output=True,
+            creationflags=CREATE_NO_WINDOW,
+            timeout=timeout,
+        )
+    except Exception:
+        return False
+    return query_service(name) == "RUNNING"
 
 
 def find_processes_by_image(image: str) -> list[dict]:

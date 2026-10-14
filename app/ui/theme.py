@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QProxyStyle, QStyle
 
 
 # минимальная длина бегунка полосы прокрутки, px
-MIN_SLIDER = 34
+MIN_SLIDER = 46
 
 
 class ScrollbarStyle(QProxyStyle):
@@ -167,18 +167,6 @@ QListWidget#Nav::item:selected {
     font-weight: 650;
 }
 
-QLabel#AdminBadge {
-    background-color: $surface_alt;
-    border: 1px solid $border;
-    border-radius: 11px;
-    padding: 5px 11px;
-    color: $muted;
-    font-size: 8.5pt;
-    font-weight: 650;
-}
-QLabel#AdminBadge[admin="yes"] { color: $green; border-color: $green_soft; background-color: $green_soft; }
-QLabel#AdminBadge[admin="no"] { color: $amber; border-color: $amber_soft; background-color: $amber_soft; }
-
 /* ---------------- карточки и панели ---------------- */
 
 QFrame#Card {
@@ -255,7 +243,6 @@ QLabel#muted { color: $muted; }
 QLabel#sectionLabel { color: $faint; font-size: 8.5pt; font-weight: 700; }
 QLabel#hintLabel { color: $faint; font-size: 9pt; }
 QLabel#stateLabel { font-weight: 650; }
-QLabel#mono { font-family: $mono_stack; font-size: 9pt; color: $muted; }
 QLabel#rowTitle { font-size: 10.5pt; font-weight: 650; color: $text; }
 QLabel#statValue { font-size: 16pt; font-weight: 700; color: $text; }
 QLabel#statLabel { color: $faint; font-size: 8pt; font-weight: 700; }
@@ -312,49 +299,6 @@ QPushButton#primary:disabled {
     border-bottom: 2px solid $border;
 }
 
-/* акцентная кнопка без подчёркивания (диалог обновлений) */
-QPushButton#glassAccent {
-    background-color: transparent;
-    color: $accent_hover;
-    border: 1px solid rgba(130, 168, 255, 0.45);
-    border-radius: 12px;
-    font-weight: 650;
-}
-QPushButton#glassAccent:hover {
-    background-color: rgba(91, 140, 255, 0.12);
-    color: #d3e1ff;
-    border-color: rgba(130, 168, 255, 0.80);
-}
-QPushButton#glassAccent:pressed { background-color: rgba(91, 140, 255, 0.20); color: #ffffff; }
-QPushButton#glassAccent:disabled {
-    background-color: transparent;
-    color: $faint;
-    border-color: $border;
-}
-
-QPushButton#danger {
-    background-color: transparent;
-    color: $red;
-    border: 1px solid transparent;
-}
-QPushButton#danger:hover {
-    background-color: rgba(255, 107, 107, 0.12);
-    color: #ff9b9b;
-    border-color: rgba(255, 107, 107, 0.45);
-}
-
-QPushButton#success {
-    background-color: transparent;
-    color: $green;
-    border: 1px solid transparent;
-    font-weight: 650;
-}
-QPushButton#success:hover {
-    background-color: rgba(62, 207, 142, 0.12);
-    color: #6ee7b0;
-    border-color: rgba(62, 207, 142, 0.45);
-}
-
 QPushButton#ghost {
     background-color: transparent;
     border: 1px solid transparent;
@@ -364,6 +308,81 @@ QPushButton#ghost:hover {
     color: $text;
     background-color: rgba(255, 255, 255, 0.05);
     border-color: rgba(255, 255, 255, 0.10);
+}
+
+/* ---------------- стеклянная кнопка (как карточки обхода) ----------
+
+   Тот же приём, что у BypassCard: полупрозрачная заливка + тонкая
+   светлая рамка. Выглядит «стеклом» поверх тёмного фона окна и одинаково
+   хорошо читается в настройках, компонентах и диагностике. */
+QPushButton#glass {
+    background-color: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 13px;
+    padding: 8px 16px;
+    color: $text;
+    font-weight: 650;
+}
+QPushButton#glass:hover {
+    background-color: rgba(255, 255, 255, 0.085);
+    border-color: rgba(255, 255, 255, 0.22);
+}
+QPushButton#glass:pressed {
+    background-color: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+QPushButton#glass:disabled {
+    background-color: rgba(255, 255, 255, 0.02);
+    border-color: rgba(255, 255, 255, 0.06);
+    color: $faint;
+}
+
+/* акцентное стекло: та же основа, но синяя рамка и синый текст */
+QPushButton#glassPrimary {
+    background-color: rgba(91, 140, 255, 0.10);
+    border: 1px solid rgba(130, 168, 255, 0.42);
+    border-radius: 13px;
+    padding: 8px 16px;
+    color: #c3d6ff;
+    font-weight: 650;
+}
+QPushButton#glassPrimary:hover {
+    background-color: rgba(91, 140, 255, 0.17);
+    border-color: rgba(130, 168, 255, 0.72);
+    color: #e2ecff;
+}
+QPushButton#glassPrimary:pressed {
+    background-color: rgba(91, 140, 255, 0.24);
+    color: #ffffff;
+}
+QPushButton#glassPrimary:disabled {
+    background-color: rgba(255, 255, 255, 0.02);
+    border-color: rgba(255, 255, 255, 0.06);
+    color: $faint;
+}
+
+/* опасное стекло: красная рамка, для «Удалить программу» и «Закрыть» */
+QPushButton#glassDanger {
+    background-color: rgba(255, 107, 107, 0.08);
+    border: 1px solid rgba(255, 107, 107, 0.35);
+    border-radius: 13px;
+    padding: 8px 16px;
+    color: #ff9b9b;
+    font-weight: 650;
+}
+QPushButton#glassDanger:hover {
+    background-color: rgba(255, 107, 107, 0.16);
+    border-color: rgba(255, 107, 107, 0.68);
+    color: #ffc4c4;
+}
+QPushButton#glassDanger:pressed {
+    background-color: rgba(255, 107, 107, 0.24);
+    color: #ffffff;
+}
+QPushButton#glassDanger:disabled {
+    background-color: rgba(255, 255, 255, 0.02);
+    border-color: rgba(255, 255, 255, 0.06);
+    color: $faint;
 }
 
 /* иконка-кнопка: только значок, подсветка при наведении */
@@ -377,18 +396,6 @@ QPushButton#iconButton:hover {
     background-color: rgba(255, 255, 255, 0.07);
     border-color: rgba(255, 255, 255, 0.12);
 }
-/* активная иконка-кнопка: светится акцентом, без заливки */
-QPushButton#iconButtonActive {
-    background-color: rgba(91, 140, 255, 0.10);
-    border: 1px solid rgba(130, 168, 255, 0.45);
-    border-radius: 11px;
-    padding: 6px;
-}
-QPushButton#iconButtonActive:hover {
-    background-color: rgba(91, 140, 255, 0.18);
-    border-color: rgba(130, 168, 255, 0.75);
-}
-
 /* ---------------- всплывающие уведомления ---------------- */
 
 QFrame#Toast {
@@ -488,6 +495,21 @@ QPushButton#bypassGear:hover {
     border-color: rgba(255, 255, 255, 0.14);
 }
 
+/* ---------------- диагностика: журнал одной стратегии ---------- */
+
+/* строка-заголовок списка стратегий */
+QWidget#SectionBar {
+    background-color: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+}
+QLabel#sectionTitle {
+    color: $text;
+    font-size: 11pt;
+    font-weight: 700;
+    background: transparent;
+}
+
 /* ---------------- диагностика: карточка текущей проверки ---------- */
 
 QFrame#LiveCard {
@@ -501,6 +523,19 @@ QFrame#LiveCard[mode="best"] {
         stop: 0 $green_soft, stop: 1 $surface);
     border: 1px solid $green;
 }
+/* проверять нечем: причина названа прямо, а не «нет доступа» в каждой строке */
+QFrame#LiveCard[mode="fail"] {
+    background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 $red_soft, stop: 1 $surface);
+    border: 1px solid rgba(255, 107, 107, 0.55);
+}
+
+/* предупреждение о правах администратора на странице диагностики */
+QFrame#AdminBanner {
+    background-color: rgba(255, 184, 77, 0.09);
+    border: 1px solid rgba(255, 184, 77, 0.38);
+    border-radius: 16px;
+}
 QProgressBar#LiveBar {
     background-color: rgba(255, 255, 255, 0.06);
     border: none;
@@ -512,6 +547,30 @@ QProgressBar#LiveBar::chunk {
     background-color: $accent;
     border-radius: 3px;
 }
+
+/* прогресс всего прогона в карточке «Автоподбор стратегии» */
+QProgressBar#RunProgress {
+    background-color: rgba(255, 255, 255, 0.07);
+    border: none;
+    border-radius: 3px;
+    min-height: 6px;
+    max-height: 6px;
+}
+QProgressBar#RunProgress::chunk {
+    background-color: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 $accent_deep, stop: 1 $accent_hover);
+    border-radius: 3px;
+}
+
+/* описание релиза в окне обновления программы */
+QTextBrowser#ReleaseNotes {
+    background-color: rgba(0, 0, 0, 0.24);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 10px 12px;
+    color: #c9d2e4;
+}
+QTextBrowser#ReleaseNotes QScrollBar:vertical { margin: 4px 2px; }
 
 QPlainTextEdit#TargetsEdit {
     background-color: rgba(255, 255, 255, 0.03);
@@ -528,38 +587,28 @@ QPlainTextEdit#TargetsEdit:focus {
     background-color: rgba(255, 255, 255, 0.05);
 }
 
-QPushButton#SectionToggle {
-    text-align: left;
-    padding: 12px 16px;
-    border: 1px solid $border;
-    border-radius: 14px;
-    background-color: $surface_alt;
-    color: $text;
-    font-size: 11pt;
-    font-weight: 700;
-}
-QPushButton#SectionToggle:hover {
-    border-color: $accent;
-    color: $accent_hover;
-    background-color: $surface;
-}
-QPushButton#SectionToggle:pressed {
+/* ---------------- статус обходов в боковом меню ----------------
+
+   Раньше здесь был полукруг с пузырьками. Он не помещался в панель,
+   обрезался, и вместо купола виднелись только бледное пятно и пара
+   кругов по бокам. Оставлена только суть: точка и подпись. */
+QFrame#StatusDot {
     background-color: rgba(255, 255, 255, 0.03);
+    border: 1px solid $border;
+    border-radius: 12px;
 }
-QPushButton#SectionToggle:checked {
-    color: $accent_hover;
-    border-color: $accent_line;
+QFrame#StatusDot[on="yes"] {
+    background-color: rgba(62, 207, 142, 0.09);
+    border-color: rgba(62, 207, 142, 0.35);
 }
-QPushButton#SectionToggle QLabel {
-    background: transparent;
-    color: inherit;
+QFrame#StatusDotMark {
+    border-radius: 5px;
+    border: none;
 }
-QLabel#SectionToggleText {
-    font-size: 11pt;
-    font-weight: 700;
-    color: inherit;
-    background: transparent;
-}
+QFrame#StatusDotMark[on="no"] { background-color: $faint; }
+QFrame#StatusDotMark[on="yes"] { background-color: $green; }
+QLabel#StatusDotText { color: $muted; background: transparent; }
+QLabel#StatusDotText { font-weight: 600; }
 
 /* ---------------- диагностика: строки стратегий ---------------- */
 
@@ -572,11 +621,6 @@ QFrame#StrategyRow:hover {
     background-color: $surface_alt;
     border-color: $border_strong;
 }
-QFrame#StrategyRow[selected="yes"] {
-    background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-        stop: 0 $accent_soft, stop: 1 $surface);
-    border-color: $accent;
-}
 QFrame#StrategyRow[busy="yes"] {
     background-color: $surface;
     border-color: $border;
@@ -588,39 +632,75 @@ QFrame#StrategyRow[active="yes"] {
     background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
         stop: 0 $accent_soft, stop: 1 $surface);
 }
-QFrame#StrategyRow[expanded="yes"] {
-    background-color: $surface_alt;
+/* стратегия не проверялась в этом прогоне: серая строка с прочерком.
+   Не красная: это не провал, стратегия просто не запускалась. */
+QFrame#StrategyRow[untested="yes"] {
+    border-color: $border;
+    background-color: rgba(255, 255, 255, 0.02);
+}
+QFrame#StrategyRow[untested="yes"]:hover {
+    border-color: $border_strong;
+}
+QFrame#StrategyRow[untested="yes"] QLabel#rowTitle {
+    color: $faint;
+}
+QFrame#StrategyRow[untested="yes"] QLabel#muted {
+    color: $faint;
+}
+/* стратегию отметили галочкой — рамка и лёгкий синий фон */
+QFrame#StrategyRow[picked="yes"] {
+    border-color: rgba(130, 168, 255, 0.45);
+    background-color: rgba(91, 140, 255, 0.06);
+}
+QFrame#StrategyRow[picked="yes"]:hover {
+    border-color: rgba(130, 168, 255, 0.70);
+}
+/* лучшая стратегия — зелёная рамка */
+QFrame#StrategyRow[selected="yes"] {
+    border-color: rgba(62, 214, 152, 0.55);
+    background-color: rgba(62, 214, 142, 0.09);
+}
+QFrame#StrategyRow[selected="yes"]:hover {
+    border-color: rgba(62, 214, 152, 0.80);
 }
 
-/* галочка «проверять эту стратегию» в строке */
-QCheckBox#RowPick {
+/* квадратный чекбокс: штатный индикатор, стилизованный через QSS.
+
+   Индикатор нарисован не вручную, а взят у стиля — поэтому он всегда на
+   своём месте, нужного размера и, главное, кликабельный. Раньше квадрат
+   рисовался сам по себе, а штатный индикатор прятался нулевым размером:
+   квадрат был виден, но щёлчок по нему не срабатывал, и он уезжал под
+   текст. Галочку внутри рисует код (QSS не умеет data:-URI). */
+QCheckBox[check="yes"] {
     background: transparent;
-    spacing: 0;
+    spacing: 9px;
+    color: $text;
 }
-QCheckBox#RowPick::indicator {
+QCheckBox[check="yes"]::indicator {
     width: 17px;
     height: 17px;
     border: 1.5px solid $border_strong;
     border-radius: 5px;
     background-color: $input_bg;
 }
-QCheckBox#RowPick::indicator:hover {
+QCheckBox[check="yes"]::indicator:hover {
     border-color: $accent;
 }
-QCheckBox#RowPick::indicator:checked {
+QCheckBox[check="yes"]::indicator:checked {
     background-color: $accent;
     border-color: $accent;
-    image: none;
 }
-QCheckBox#RowPick::indicator:unchecked {
-    image: none;
+QCheckBox[check="yes"]::indicator:unchecked {
+    background-color: $input_bg;
+}
+QCheckBox[check="yes"]:disabled {
+    color: $faint;
+}
+QCheckBox[check="yes"]::indicator:disabled {
+    border-color: $border;
+    background-color: rgba(255, 255, 255, 0.02);
 }
 
-/* журнал одной стратегии под строкой */
-QFrame#StrategyLog {
-    background-color: transparent;
-    border: none;
-}
 QPlainTextEdit#StrategyLogView {
     background-color: rgba(0, 0, 0, 0.28);
     border: 1px solid $border;
@@ -634,8 +714,13 @@ QLabel#StrategyRank {
     color: $faint;
     font-size: 11pt;
     font-weight: 700;
+    background: transparent;
 }
-QLabel#StrategyRank[best="yes"] { color: $accent_hover; }
+QLabel#StrategyRank[best="yes"] { color: $green; }
+QLabel#StrategyRank[untested="yes"] {
+    color: $faint;
+    font-size: 12pt;
+}
 QWidget#ResultBar {
     background-color: rgba(255, 255, 255, 0.05);
     border-radius: 3px;
@@ -659,6 +744,10 @@ QComboBox::drop-down {
     width: 24px;
     border: none;
 }
+/* Выпадающий список комбо — отдельное окно. Без скруглённой маски
+   (её ставит PickComboBox.showPopup) по углам видно квадратный фон,
+   хотя сама рамка скруглена. Фон жёлоба здесь не рисуем: его задаёт
+   прозрачный фон popup-окна. */
 QComboBox QAbstractItemView {
     background-color: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
         stop: 0 #1b2434, stop: 1 #131a27);
@@ -669,6 +758,7 @@ QComboBox QAbstractItemView {
     selection-background-color: rgba(91, 140, 255, 0.30);
     selection-color: #ffffff;
 }
+QComboBox QAbstractItemView::scroller { border-radius: 13px; }
 QComboBox QAbstractItemView::item {
     border-radius: 9px;
     padding: 8px 11px;
@@ -729,30 +819,47 @@ QProgressBar::chunk {
 /* ---------------- прокрутка ---------------- */
 
 QScrollArea { background-color: transparent; border: none; }
+
+/* Полоса прокрутки: жёлоб и бегунок скруглены по краям, бегунок —
+   капсула. Ширина 10px, чтобы его было проще схватить мышью. */
 QScrollBar:vertical {
-    background: transparent;
-    width: 8px;
-    margin: 4px 2px;
+    background: rgba(255, 255, 255, 0.04);
+    width: 10px;
+    margin: 3px 3px;
+    border-radius: 5px;
 }
 QScrollBar::handle:vertical {
     background: $border_strong;
     border-radius: 5px;
-    min-height: 40px;
+    /* бегунок не сжимается в точку на длинных списках */
+    min-height: 46px;
 }
 QScrollBar::handle:vertical:hover { background: $muted; }
+QScrollBar::handle:vertical:pressed { background: $accent; }
 QScrollBar:horizontal {
-    background: transparent;
-    height: 8px;
-    margin: 2px 4px;
+    background: rgba(255, 255, 255, 0.04);
+    height: 10px;
+    margin: 3px 3px;
+    border-radius: 5px;
 }
 QScrollBar::handle:horizontal {
     background: $border_strong;
     border-radius: 5px;
-    min-width: 40px;
+    min-width: 46px;
 }
 QScrollBar::handle:horizontal:hover { background: $muted; }
+QScrollBar::handle:horizontal:pressed { background: $accent; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* Список адресов TgWsProxy и подобные длинные списки: там бегунок
+   особенно легко уходил в пиксель. Держим его крупным всегда. */
+QPlainTextEdit QScrollBar::handle:vertical,
+QTextEdit QScrollBar::handle:vertical,
+QListWidget QScrollBar::handle:vertical,
+QListView QScrollBar::handle:vertical {
+    min-height: 56px;
+}
 
 /* ---------------- статусные пилюли ---------------- */
 
@@ -773,13 +880,6 @@ QLabel#pillStopped {
     padding: 4px 11px;
     font-weight: 650;
     font-size: 8.5pt;
-}
-/* свёрнутая боковая панель: статус короткий — «2/2» или «STOP» */
-QLabel#pillRunning[compact="yes"],
-QLabel#pillStopped[compact="yes"] {
-    padding: 4px 6px;
-    font-size: 8.5pt;
-    font-weight: 700;
 }
 QLabel#pillWarn {
     background-color: $amber_soft;

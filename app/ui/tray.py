@@ -78,7 +78,13 @@ class TrayManager(QObject):
 
     def _quit(self) -> None:
         self.icon.hide()
-        self.ctx.shutdown()
+        # обходы продолжают работать после выхода (как обычные .bat-файлы),
+        # если пользователь не попросил останавливать их при выходе
+        self.ctx.shutdown(
+            stop_components=bool(
+                self.ctx.config.general.stop_components_on_quit
+            )
+        )
         QApplication.quit()
 
     def notify(self, title: str, message: str, msec: int = 4000) -> None:

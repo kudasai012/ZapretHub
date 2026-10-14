@@ -67,7 +67,7 @@ class TgwsPanel(ComponentPanel):
 
         self.secret_edit = QLineEdit()
         self.secret_edit.setText(self.ctx.config.tgws.secret)
-        generate = IconButton("key", tr("tgws.generate"))
+        generate = IconButton("key", tr("tgws.generate"), "glass")
         generate.clicked.connect(self._generate_secret)
         c_layout.addWidget(FormRow(tr("tgws.secret"), self.secret_edit, generate))
 
@@ -83,9 +83,9 @@ class TgwsPanel(ComponentPanel):
         self.link_edit.setText(self.ctx.tgws.proxy_link())
         self.link_edit.setMinimumWidth(300)
         link_row.addWidget(self.link_edit, 1)
-        copy_button = IconButton("copy", tr("tgws.copy_link"))
+        copy_button = IconButton("copy", tr("tgws.copy_link"), "glass")
         copy_button.setMinimumWidth(150)
-        open_button = IconButton("send", tr("tgws.open_tg"), "primary")
+        open_button = IconButton("send", tr("tgws.open_tg"), "glassPrimary")
         open_button.setMinimumWidth(180)
         copy_button.clicked.connect(self._copy_link)
         open_button.clicked.connect(self._open_telegram)
@@ -139,7 +139,7 @@ class TgwsPanel(ComponentPanel):
             checks.addWidget(box, index // 3, index % 3)
         a_layout.addLayout(checks)
 
-        apply_button = IconButton("check", tr("common.apply"), "primary")
+        apply_button = IconButton("check", tr("common.apply"), "glassPrimary")
         apply_button.clicked.connect(self._apply)
         a_layout.addWidget(apply_button, 0)
         self.add_widget(adv)

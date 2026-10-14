@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, Signal
 
@@ -69,6 +70,54 @@ def _tokenize_windows(line: str) -> List[str]:
     return tokens
 
 
+# Сколько ждать после остановки zapret перед пробным запуском: процесс
+# уже мёртв, но фильтр WinDivert освобождает ядро, и новая копия winws
+# успевала стартовать раньше и получить отказ.
+PROBE_SETTLE_SECONDS = 1.5
+
+# Сколько ждать, пока winws.exe подтвердит, что он действительно работает.
+# Отказ «A copy of winws is already running with the same filter» приходит
+# через пару сотен миллисекунд, поэтому проверка короче секунды — уже
+# достаточна, а пользователь задержки не замечает.
+START_CONFIRM_SECONDS = 0.8
+
+# Известные причины, по которым winws.exe умирает сразу после старта.
+# Текст — как его пишет сам winws; он английский, а пользователю нужен
+# прямой ответ по-русски. Код выхода при всех случаях 1, поэтому без
+# этого сопоставления в интерфейсе оставалось бы «завершился с кодом 1».
+WINWS_KNOWN_FAILURES: Tuple[Tuple[str, str], ...] = (
+    (
+        "A copy of winws is already running with the same filter",
+        "уже запущена другая копия winws с тем же фильтром — "
+        "выключите zapret (или снимите службу) и повторите",
+    ),
+    (
+        "error opening filter",
+        "фильтр WinDivert занят предыдущей копией winws — "
+        "подождите пару секунд и повторите",
+    ),
+    (
+        "could not read",
+        "winws не смог прочитать свои файлы — "
+        "переустановите компонент zapret",
+    ),
+)
+
+
+def winws_failure_reason(output: Sequence[str]) -> str:
+    """Человеческая причина провала по тому, что написал сам winws.
+
+    Раньше причина провала в интерфейсе не отличалась от кода выхода:
+    «завершился с кодом 1» и дальше простыня английского лога. Пользователю
+    приходилось самому искать в ней строку, которая что-то значит.
+    """
+    for line in output:
+        for needle, reason in WINWS_KNOWN_FAILURES:
+            if needle in line:
+                return reason
+    return ""
+
+
 class ZapretComponent(QObject):
     status_changed = Signal(str)
     log_line = Signal(str)
@@ -77,6 +126,9 @@ class ZapretComponent(QObject):
         super().__init__(parent)
         self.config = config
         self._proc: Optional[ManagedProcess] = None
+        # причина, по которой последняя попытка запуска не удержалась:
+        # winws.exe отказывается работать второй копией с тем же фильтром
+        self._last_start_failed = ""
 
     # ------------------------------------------------------------ пути
 
@@ -466,6 +518,31 @@ class ZapretComponent(QObject):
             self._log(f"[hub] не найден {exe}")
             return False
 
+        ok = self._launch(exe, args)
+        if not ok:
+            # winws.exe мог умереть сразу: «A copy of winws is already
+            # running with the same filter» — своя же предыдущая копия ещё
+            # держит фильтр WinDivert. Раньше это выглядело как успешный
+            # старт, и обход просто молча не работал. Один повтор с паузой
+            # такие случаи вытягивает.
+            if self._last_start_failed:
+                time.sleep(PROBE_SETTLE_SECONDS)
+                ok = self._launch(exe, args)
+        if ok:
+            self._log("[hub] zapret запущен (winws.exe)")
+        elif self._last_start_failed:
+            self._log(f"[hub] {self._last_start_failed}")
+        return ok
+
+    def _launch(self, exe: Path, args: List[str]) -> bool:
+        """Один реальный запуск winws.exe + проверка, что он дожил.
+
+        ``ManagedProcess.start()`` возвращает успех, если процесс создан, —
+        но не если он уцелел. winws.exe отказывается работать второй копией
+        с тем же фильтром и выходит с кодом 1 через пару сотен миллисекунд,
+        то есть уже после того, как ``start()`` отрапортовал успех.
+        """
+        self._last_start_failed = ""
         self._proc = ManagedProcess(
             key="zapret",
             exe=exe,
@@ -478,10 +555,37 @@ class ZapretComponent(QObject):
         self._proc.status_changed.connect(self.status_changed)
         self._proc.log_line.connect(self._log)
         self._log(f"[hub] стратегия: {self.config.zapret.strategy}")
-        ok = self._proc.start()
-        if ok:
-            self._log("[hub] zapret запущен (winws.exe)")
-        return ok
+        if not self._proc.start():
+            return False
+
+        # winws пишет причину отказа в лог и умирает. Ждём ровно столько,
+        # чтобы отказ успел произойти, но недостаточно, чтобы пользователь
+        # заметил задержку при нормальном старте.
+        deadline = time.time() + START_CONFIRM_SECONDS
+        while time.time() < deadline:
+            if not self._proc.is_running():
+                break
+            time.sleep(0.05)
+
+        if self._proc.is_running():
+            return True
+
+        # процесс умер: причина — из его же последних строк
+        tail = self._recent_log_lines()
+        self._last_start_failed = winws_failure_reason(tail) or (
+            "winws.exe завершился сразу после запуска"
+        )
+        return False
+
+    def _recent_log_lines(self, count: int = 40) -> List[str]:
+        """Последние строки журнала winws — для разбора причины отказа."""
+        try:
+            text = paths.LOGS_DIR.joinpath("zapret.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            return []
+        return [line for line in text.splitlines() if line.strip()][-count:]
 
     def stop(self) -> None:
         if self._proc:
@@ -489,8 +593,29 @@ class ZapretComponent(QObject):
         self.status_changed.emit(STATUS_STOPPED)
 
     def restart(self) -> bool:
+        """Перезапуск с гарантированно новым процессом.
+
+        Обычный ``start()`` возвращает True, если winws уже жив, и новый
+        процесс при этом не поднимается. Для смены стратегии это неверно:
+        остаётся winws от прошлой стратегии, и замеры идут по нему. Поэтому
+        здесь стоп обязателен, а если стоп не добил процесс (winws держит
+        фильтр WinDivert и может не реагировать на terminate) — гасим по имени
+        образа и ждём, пока PID действительно исчезнет.
+        """
         self.stop()
-        time.sleep(0.6)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not self.is_running():
+                break
+            try:
+                win32.kill_foreign_processes("winws.exe", self.own_pids())
+            except Exception:  # noqa: BLE001 - не роняем перезапуск
+                pass
+            time.sleep(0.3)
+        else:
+            self._log("[hub] winws не остановился, перезапуск отменён")
+            return False
+        time.sleep(0.4)
         return self.start()
 
     def is_running(self) -> bool:
@@ -524,6 +649,213 @@ class ZapretComponent(QObject):
         self.config.zapret.ipset_mode = "loaded"
         lines = len([l for l in text.splitlines() if l.strip()])
         return f"IPSet обновлён: {lines} записей"
+
+    def probe_start(self, seconds: float = 3.0) -> Dict[str, object]:
+        """Однократная проверка: сможем ли мы вообще запустить стратегию.
+
+        Диагностика стратегий перебирает все ``general*.bat`` и меряет сайты.
+        Если по какой-то причине ``winws.exe`` не держится (нет прав, занят
+        файл, служба ``zapret``, битый список), каждая стратегия получает
+        отказ — и выглядит это как «диагностика сломалась», хотя причина
+        одна и та же. Этот метод запускает стратегию один раз, ждёт
+        ``seconds`` и возвращает факты: жив ли процесс, чем завершился,
+        что он сам написал. Дальше UI показывает их словами.
+
+        Раньше такой проверки не было: пользователь видел только «нет
+        доступа» в каждой строке и не мог понять, где именно ошибка.
+        """
+        result: Dict[str, object] = {
+            "started": False,
+            "alive": False,
+            "exit_code": None,
+            "reason": "",
+            "output": [],
+            "command": "",
+        }
+        # Служба zapret и standalone-запуск не уживаются: фильтр WinDivert
+        # один на систему. Пакет штатно ставит winws.exe службой
+        # (service.bat), и его же service.bat в этом случае отказывается
+        # запускать стратегию напрямую. Раньше проба просто сообщала
+        # «служба активна» — и пользователь оставался без ответа, хотя
+        # достаточно остановить службу на время проверки и вернуть после.
+        service_was_running = False
+        try:
+            state = self.service_state()
+        except Exception:  # noqa: BLE001 - проверка может быть недоступна
+            state = None
+        if state and state not in ("STOPPED", "STOP_PENDING"):
+            if win32.stop_service(SERVICE_NAME):
+                service_was_running = True
+                time.sleep(PROBE_SETTLE_SECONDS)
+            else:
+                result["reason"] = (
+                    f"служба zapret активна ({state}) и не остановилась — "
+                    "уберите её через service.bat"
+                )
+                return result
+
+        # Службу возвращаем через finally, а не в каждой ветке выхода:
+        # в теле пробы есть ранние return (не найден exe, битый .bat,
+        # не удалось запустить), и на любом из них служба обязана вернуться
+        # на место. Иначе кнопка диагностики тихо оставляла бы обход
+        # отключённым.
+        try:
+            return self._probe_body(result, seconds)
+        finally:
+            if service_was_running:
+                self._restore_service()
+
+    def _probe_body(
+        self, result: Dict[str, object], seconds: float
+    ) -> Dict[str, object]:
+        """Сама проба: запустить winws.exe и посмотреть, доживёт ли.
+
+        Вынесено из ``probe_start``, чтобы остановка и возврат службы zapret
+        жили в одном месте (``finally``) и не дублировались по веткам.
+        """
+        reason = self.start_block_reason()
+        if reason:
+            result["reason"] = reason
+            return result
+
+        # winws.exe сам отказывается работать второй копией: «A copy of
+        # winws is already running with the same filter» и код 1. Раньше
+        # проба запускалась поверх уже включённого zapret, и пользователь
+        # видел «завершился с кодом 1» с простынёй английского текста, из
+        # которого надо было самому догадаться, что мешает своя же копия.
+        # Теперь перед пробой гасим компонент и ждём, пока ядро отпустит
+        # фильтр WinDivert, а после неё возвращаем всё как было.
+        was_running = self.is_running()
+        if was_running:
+            self.stop()
+            # процесс мёртв, но фильтр WinDivert ещё держится ядром: без
+            # этой паузы следующая копия получает отказ по той же причине
+            time.sleep(PROBE_SETTLE_SECONDS)
+        try:
+            exe, args = self.parse_strategy()
+            result["command"] = " ".join([str(exe)] + [str(a) for a in args])
+        except ZapretError as exc:
+            result["reason"] = str(exc)
+            return result
+        if not exe.exists():
+            result["reason"] = f"не найден {exe}"
+            return result
+
+        raw = paths.LOGS_DIR / "zapret-probe.out.log"
+        try:
+            raw.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        handle = None
+        try:
+            handle = open(raw, "wb")
+        except OSError:
+            handle = None
+
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [str(exe)] + [str(a) for a in args],
+                cwd=str(exe.parent),
+                stdout=handle if handle is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=win32.creation_flags(),
+            )
+        except Exception as exc:  # noqa: BLE001 - причина и есть ответ
+            result["reason"] = f"не удалось запустить: {exc}"
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            return result
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+
+        result["started"] = True
+        result["pid"] = proc.pid
+        deadline = time.time() + max(0.5, seconds)
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        if proc.poll() is None:
+            result["alive"] = True
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            result["exit_code"] = proc.returncode
+
+        try:
+            text = raw.read_text(encoding="utf-8", errors="replace")
+            lines = [line for line in text.splitlines() if line.strip()]
+            result["output"] = lines[-25:]
+        except OSError:
+            pass
+
+        # Причина провала называется словами, а не кодом выхода. Проверка
+        # запуска существует ровно для этого: сказать, что не так.
+        if not result["alive"] and not result["reason"]:
+            known = winws_failure_reason(result["output"])
+            if known:
+                result["reason"] = known
+
+        # Возвращаем zapret в то состояние, в котором он был до пробы:
+        # кнопка диагностическая, а не выключатель обхода. Свою пробную
+        # копию мы к этому моменту уже погасили (или она умерла сама), так
+        # что фильтр свободен — но ядро отпускает его не мгновенно.
+        if was_running:
+            time.sleep(PROBE_SETTLE_SECONDS)
+            self.start()
+
+        return result
+
+    def _restore_service(self) -> bool:
+        """Возвращает службу zapret, которую гасили ради проверки."""
+        self._log("[hub] возвращаю службу zapret")
+        ok = win32.start_service(SERVICE_NAME)
+        self._log(
+            "[hub] служба zapret снова запущена"
+            if ok
+            else "[hub] не удалось вернуть службу zapret — запустите её вручную"
+        )
+        return ok
+
+    def start_block_reason(self) -> str:
+        """Почему стратегию нельзя запустить прямо сейчас. Пусто — можно.
+
+        Вынесено из ``start()``: раньше причина проверялась только внутри
+        него и уходила в общий журнал, а в интерфейсе оставалось «нет
+        доступа».
+        """
+        if not self.installed():
+            return "компонент zapret не установлен"
+        if not win32.IS_WINDOWS:
+            return "zapret работает только в Windows"
+        if not win32.is_admin():
+            return (
+                "нужны права администратора: winws.exe работает через "
+                "WinDivert и без повышения не запускается"
+            )
+        conflict = self.service_conflict()
+        if conflict:
+            return f"служба Windows «zapret» активна ({conflict}) — уберите её"
+        return ""
 
     def run_diagnostics(self) -> bool:
         """Запускает utils/test zapret.ps1 в отдельном окне PowerShell."""

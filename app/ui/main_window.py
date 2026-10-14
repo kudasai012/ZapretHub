@@ -19,13 +19,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..core import win32
 from ..i18n import current_language, tr
 from . import anim, icons, theme
 from .app_icon import app_icon, app_pixmap
 from .pages import ComponentsPage, DiagnosticsPage, HomePage, SettingsPage
 from .tray import TrayManager
-from .widgets import IconButton, StatusPill, show_toast
+from .widgets import ClickLabel, IconButton, StatusDot, show_toast
 
 TITLES = {"zapret": "zapret-discord-youtube", "tgws": "TG WS Proxy"}
 
@@ -59,7 +60,9 @@ class MainWindow(QMainWindow):
         self.ctx = ctx
         self.tray_mode = tray_mode
         self.language = current_language()
-        self.setWindowTitle(tr("app.name"))
+        # версия в заголовке окна: иначе невозможно понять, какая сборка
+        # запущена, и жалобы приходят на уже исправленный код
+        self.setWindowTitle(f"{tr('app.name')} {__version__}")
         self.resize(1200, 840)
         self.setMinimumSize(980, 680)
         self.setProperty("theme_name", "dark")
@@ -111,18 +114,24 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.setSpacing(8)
 
-        self.brand_icon = QLabel()
+        # подпись с названием и иконка кликабельны: сворачивают и
+        # разворачивают панель так же, как кнопка-шеврон рядом
+        self.brand_icon = ClickLabel()
         self.brand_icon.setObjectName("BrandIcon")
         self.brand_icon.setFixedSize(34, 34)
         self.brand_icon.setAlignment(Qt.AlignCenter)
+        self.brand_icon.setToolTip(tr("sidebar.expand"))
+        self.brand_icon.clicked.connect(self.toggle_sidebar)
         self._set_brand_pixmap()
         self.brand_icon.setVisible(self._collapsed)
         head.addWidget(self.brand_icon, 0, Qt.AlignTop)
 
         titles = QVBoxLayout()
         titles.setSpacing(2)
-        self.brand_title = QLabel(tr("app.name"))
+        self.brand_title = ClickLabel(tr("app.name"))
         self.brand_title.setObjectName("BrandTitle")
+        self.brand_title.setToolTip(tr("sidebar.collapse"))
+        self.brand_title.clicked.connect(self.toggle_sidebar)
         titles.addWidget(self.brand_title)
         self.brand_sub = QLabel(tr("app.subtitle"))
         self.brand_sub.setObjectName("BrandSub")
@@ -163,10 +172,21 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
+        # --- кнопка «Обновление»: появляется, когда на GitHub свежее ---
+        self.update_button = IconButton(
+            "download", tr("sidebar.update_ready"), "glassPrimary"
+        )
+        self.update_button.setToolTip(tr("sidebar.update_hint"))
+        self.update_button.setMinimumHeight(34)
+        self.update_button.clicked.connect(self.show_app_update)
+        self.update_button.setVisible(False)
+        layout.addWidget(self.update_button, 0)
+
         # --- состояние запретов в подвале боковой панели ---
-        self.state_pill = StatusPill()
-        self.state_pill.setMinimumHeight(28)
-        layout.addWidget(self.state_pill, 0)
+        # дуга с пузырьками: зелёная когда работает, серая когда нет
+        self.state_arc = StatusDot()
+        self.state_arc.setToolTip(tr("status.arc_hint"))
+        layout.addWidget(self.state_arc, 0)
 
         self._apply_sidebar_mode()
         return self.sidebar
@@ -227,12 +247,9 @@ class MainWindow(QMainWindow):
                 item.setSizeHint(QSize(0, 52))
         self._fit_nav_height()
 
-        # в свёрнутом виде статус — короткий: 2/2 или STOP
-        self.state_pill.setMinimumWidth(0 if collapsed else 104)
-        self.state_pill.setMinimumHeight(28)
-        self.state_pill.setProperty("compact", "yes" if collapsed else "no")
-        self.state_pill.style().unpolish(self.state_pill)
-        self.state_pill.style().polish(self.state_pill)
+        # в свёрнутом виде дуга не помещается — остаётся только счётчик
+        self.state_arc.set_compact(collapsed)
+        self.state_arc.setMinimumWidth(0)
         # страницы могут быть ещё не построены (боковая панель собирается первой)
         if hasattr(self, "home_page"):
             self._refresh_state()
@@ -373,6 +390,45 @@ class MainWindow(QMainWindow):
         dialog = UpdateDialog(self.ctx, parent=self)
         dialog.exec()
 
+    def show_app_update(self) -> None:
+        """Окно обновления самой программы (кнопка в сайдбаре и в настройках)."""
+        from .app_update_dialog import AppUpdateDialog
+
+        dialog = AppUpdateDialog(self.ctx, parent=self)
+        dialog.exec()
+
+    def background_check_app_update(self) -> None:
+        """Тихая проверка при старте: не блокирует окно.
+
+        Если на GitHub нашлась версия свежее — в боковом меню над статусом
+        загорается зелёная кнопка «Обновление».
+        """
+        updater = self.ctx.app_updater
+        if getattr(self, "_bg_app_check_connected", False):
+            return
+        self._bg_app_check_connected = True
+
+        def _on_finished(release) -> None:
+            if release.update_available:
+                self.update_button.setVisible(True)
+                self.update_button.setText(
+                    tr("sidebar.update_ready_version", version=release.version)
+                )
+                show_toast(
+                    self,
+                    tr("sidebar.update_toast", version=release.version),
+                    "info",
+                    action_text=tr("upd.open"),
+                    action_cb=self.show_app_update,
+                    duration=12000,
+                )
+            else:
+                self.update_button.setVisible(False)
+
+        updater.check_finished.connect(_on_finished)
+        updater.check_failed.connect(lambda message: None)
+        updater.check(proxy=self.ctx.config.updates.proxy)
+
     def background_check_updates(self) -> None:
         """Тихая проверка при старте: не блокирует окно, результат — тост."""
         updater = self.ctx.updater
@@ -422,23 +478,28 @@ class MainWindow(QMainWindow):
         if getattr(self, "tray", None) is not None:
             self.tray.refresh()
 
-        running = self.ctx.any_running()
         installed = self.ctx.components_installed()
-        collapsed = getattr(self, "_collapsed", False)
 
-        if not installed:
-            self.state_pill.set_status("stopped", tr("common.not_installed"))
-        elif running:
-            active = sum(1 for c in (self.ctx.zapret, self.ctx.tgws) if c.is_running())
-            self.state_pill.set_status(
-                "running",
-                f"{active}/2" if collapsed else tr("dash.summary", active=active, total=2),
+        zapret_on = self.ctx.zapret.is_running()
+        tgws_on = self.ctx.tgws.is_running()
+        active = int(zapret_on) + int(tgws_on)
+        self.state_arc.set_state(
+            active,
+            2 if installed else 0,
+            zapret_on and installed,
+            tgws_on and installed,
+        )
+        self.state_arc.setToolTip(
+            tr("status.arc_hint")
+            + "\n"
+            + "\n".join(
+                f"{name}: {tr('common.running') if on else tr('common.stopped')}"
+                for name, on in (
+                    (TITLES["zapret"], zapret_on),
+                    (TITLES["tgws"], tgws_on),
+                )
             )
-        else:
-            # в свёрнутом виде — короткая метка, без слов
-            self.state_pill.set_status(
-                "stopped", "STOP" if collapsed else tr("common.stopped")
-            )
+        )
 
         # права администратора показываем подсказкой у названия программы
         admin = win32.is_admin()
@@ -493,26 +554,47 @@ class MainWindow(QMainWindow):
         self._confirm_quit(event)
 
     def _confirm_quit(self, event: QCloseEvent) -> None:
-        # установщик закрывает нас через WM_CLOSE: не спрашиваем «Выйти?»,
-        # иначе обновление встанет на модальном окне
-        if self.ctx.any_running() and not win32.quit_requested():
+        # Установщик закрывает программу через WM_CLOSE, предварительно
+        # создав маркер. В этом случае обходы гасим обязательно: иначе
+        # winws.exe и TgWsProxy держат файлы в Program Files и обновление
+        # не встанет. При обычном выходе компоненты продолжают работать.
+        by_installer = win32.quit_requested()
+        stopping = bool(
+            by_installer or self.ctx.config.general.stop_components_on_quit
+        )
+        if self.ctx.any_running() and not by_installer:
             from PySide6.QtWidgets import QMessageBox
 
             answer = QMessageBox.question(
                 self,
                 tr("app.name"),
-                tr("quit.confirm"),
+                tr("quit.confirm_keep_running"),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
-        self.ctx.shutdown()
+        if not by_installer:
+            # обычный выход: маркер снимаем, чтобы следующий запуск не ушёл
+            # молча и не погасил обходы, приняв наш выход за закрытие
+            # установщиком
+            win32.clear_quit_request()
+        self.ctx.shutdown(stop_components=stopping)
         event.accept()
 
     def quit(self) -> None:
-        self.ctx.shutdown()
+        """Выход из трея: обходы остаются работать, если так настроено.
+
+        Исключение — программа закрывается по просьбе установщика или
+        деинсталлятора: тогда обходы обязательно гасим, иначе файлы заняты.
+        """
+        self.ctx.shutdown(
+            stop_components=bool(
+                win32.quit_requested()
+                or self.ctx.config.general.stop_components_on_quit
+            )
+        )
         win32.clear_quit_request()
         QApplication.quit()
 

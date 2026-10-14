@@ -18,6 +18,30 @@ from .. import icons, theme
 from ..widgets import HintLabel, IconButton, LogView, StatusPill
 
 
+class PanelHeader(QWidget):
+    """Заголовок панели, по которому можно щёлкнуть, чтобы её свернуть.
+
+    Раньше свернуть панель можно было только маленькой кнопкой-шевроном в
+    самом углу — попадать по ней неудобно. Теперь щёлчок по любому месту
+    заголовка (название, версия, статус, пустое место) сворачивает и
+    разворачивает панель. Кнопки внутри заголовка перехватывают нажатие
+    сами, поэтому «Обновить» и «Журнал» по-прежнему работают как обычно.
+    """
+
+    clicked = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class ComponentPanel(QFrame):
     """Панель одного компонента: заголовок со статусом и кнопкой обновления."""
 
@@ -36,6 +60,7 @@ class ComponentPanel(QFrame):
         self.ctx = ctx
         self.key = key
         self._installed_shown = True
+        self._collapsed = False
 
         self.setObjectName("Panel")
         root = QVBoxLayout(self)
@@ -43,7 +68,9 @@ class ComponentPanel(QFrame):
         root.setSpacing(0)
 
         # --- заголовок ---
-        header = QHBoxLayout()
+        header_host = PanelHeader()
+        header_host.clicked.connect(self._toggle_collapsed)
+        header = QHBoxLayout(header_host)
         header.setContentsMargins(18, 16, 14, 14)
         header.setSpacing(13)
 
@@ -83,7 +110,7 @@ class ComponentPanel(QFrame):
         header.addWidget(self.update_button, 0, Qt.AlignVCenter)
 
         # --- кнопка установки (видна, пока компонент не установлен) ---
-        self.install_button = IconButton("download", tr("upd.install"), "primary")
+        self.install_button = IconButton("download", tr("upd.install"), "glassPrimary")
         self.install_button.clicked.connect(lambda: self.update_requested.emit(self.key))
         self.install_button.setVisible(False)
         header.addWidget(self.install_button, 0, Qt.AlignVCenter)
@@ -96,12 +123,29 @@ class ComponentPanel(QFrame):
         self.log_button.clicked.connect(self._toggle_log)
         header.addWidget(self.log_button, 0, Qt.AlignVCenter)
 
-        root.addLayout(header)
+        # --- сворачивание панели: виден только заголовок ---
+        # Треугольник, а не шеврон: ровно такой же значок остаётся в углу,
+        # но теперь он читается как «стрелка состояния», а весь заголовок
+        # слева от кнопок сворачивает панель так же.
+        self.collapse_button = IconButton(
+            "triangle-up" if not self._collapsed else "triangle-down",
+            "",
+            "iconButton",
+            13,
+        )
+        # тот же размер и тот же стиль, что у «Обновить» и «Журнал» рядом
+        self.collapse_button.setFixedSize(38, 38)
+        self.collapse_button.setCheckable(True)
+        self.collapse_button.setToolTip(tr("components.collapse"))
+        self.collapse_button.clicked.connect(self.set_collapsed)
+        header.addWidget(self.collapse_button, 0, Qt.AlignVCenter)
 
-        separator = QFrame()
-        separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background-color: {theme.PALETTE['border']}; border: none;")
-        root.addWidget(separator)
+        root.addWidget(header_host)
+
+        self.separator = QFrame()
+        self.separator.setFixedHeight(1)
+        self.separator.setStyleSheet(f"background-color: {theme.PALETTE['border']}; border: none;")
+        root.addWidget(self.separator)
 
         # --- содержимое настроек ---
         # --- заглушка «компонент не установлен» ---
@@ -125,7 +169,9 @@ class ComponentPanel(QFrame):
         self.placeholder_hint.setAlignment(Qt.AlignCenter)
         placeholder_layout.addWidget(self.placeholder_hint)
 
-        self.placeholder_button = IconButton("download", tr("upd.install"), "primary")
+        self.placeholder_button = IconButton(
+            "download", tr("upd.install"), "glassPrimary"
+        )
         self.placeholder_button.clicked.connect(lambda: self.update_requested.emit(self.key))
         placeholder_layout.addWidget(self.placeholder_button, 0, Qt.AlignHCenter)
 
@@ -185,6 +231,41 @@ class ComponentPanel(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Сворачивает панель до одного заголовка.
+
+        Заголовок несёт всё нужное: название, версию, статус, кнопку
+        проверки обновлений и кнопку журнала. Настройки скрыты, поэтому
+        на странице остаётся только то, что действительно нужно.
+        """
+        collapsed = bool(collapsed)
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self.separator.setVisible(not collapsed)
+        self.splitter.setVisible(not collapsed and self._installed_shown)
+        self.placeholder.setVisible(not collapsed and not self._installed_shown)
+        self.collapse_button.setChecked(collapsed)
+        self.collapse_button.set_icon(
+            "triangle-down" if collapsed else "triangle-up"
+        )
+        self.collapse_button.setToolTip(
+            tr("components.expand") if collapsed else tr("components.collapse")
+        )
+        # размер панели зависит от содержимого: просим пересчитать
+        self.updateGeometry()
+        self.setMinimumHeight(0)
+        parent = self.parentWidget()
+        while parent is not None:
+            if parent.layout() is not None:
+                parent.layout().invalidate()
+            parent.updateGeometry()
+            parent = parent.parentWidget()
+
+    def _toggle_collapsed(self) -> None:
+        """Щёлчок по заголовку: свернуть или развернуть панель."""
+        self.set_collapsed(not self._collapsed)
+
     def _toggle_log(self) -> None:
         visible = not self.log_view.isVisible()
         self.log_view.setVisible(visible)
@@ -235,10 +316,10 @@ class ComponentPanel(QFrame):
         if self._installed_shown == installed:
             return
         self._installed_shown = installed
-        self.placeholder.setVisible(not installed)
+        self.placeholder.setVisible(not installed and not self._collapsed)
         self.install_button.setVisible(not installed)
         self.log_button.setVisible(installed)
-        self.splitter.setVisible(installed)
+        self.splitter.setVisible(installed and not self._collapsed)
 
     def set_controls_enabled(self, enabled: bool) -> None:
         """Настройки доступны только если компонент установлен."""

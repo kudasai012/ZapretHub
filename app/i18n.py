@@ -12,9 +12,14 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "ru": "Zapret Hub — надстройка над проектами Flowseal. Вся логика обхода блокировок принадлежит их разработчикам; мы лишь объединяем инструменты в одном окне и управляем ими.",
         "en": "Zapret Hub is a front-end for Flowseal's projects. All bypass logic belongs to their authors; we only combine the tools in one window and manage them.",
     },
+    # Версий компонентов здесь намеренно нет: они обновляются независимо
+    # от программы, и зашитая в строку цифра устаревает сразу после
+    # следующего обновления пакета. Пользователю важнее знать, какие
+    # компоненты используются, — их точные версии видны в «Папка
+    # компонентов» и в манифесте data/components.json.
     "about.versions": {
-        "ru": "Используются: zapret-discord-youtube 1.10.3 и tg-ws-proxy v1.10.4.",
-        "en": "Built on: zapret-discord-youtube 1.10.3 and tg-ws-proxy v1.10.4.",
+        "ru": "Используются: zapret-discord-youtube и tg-ws-proxy.",
+        "en": "Built on: zapret-discord-youtube and tg-ws-proxy.",
     },
     "app.subtitle": {
         "ru": "Единый пульт управления обходом блокировок",
@@ -25,13 +30,49 @@ STRINGS: Dict[str, Dict[str, str]] = {
 
     "action.minimize": {"ru": "Свернуть", "en": "Minimize"},
     "action.close": {"ru": "Закрыть", "en": "Close"},
+    "sidebar.update_ready": {"ru": "Обновление", "en": "Update"},
+    "sidebar.update_ready_version": {"ru": "Обновление {version}", "en": "Update {version}"},
+    "sidebar.update_hint": {
+        "ru": "На GitHub вышла новая версия Zapret Hub. Нажмите, чтобы посмотреть, что изменилось, и обновиться.",
+        "en": "A newer Zapret Hub is on GitHub. Press to see what changed and update.",
+    },
+    "sidebar.update_toast": {
+        "ru": "Доступна версия Zapret Hub {version}",
+        "en": "Zapret Hub {version} is available",
+    },
     "sidebar.collapse": {"ru": "Свернуть меню", "en": "Collapse the menu"},
     "sidebar.expand": {"ru": "Развернуть меню", "en": "Expand the menu"},
+    "set.run_as_admin": {
+        "ru": "Запускать от имени администратора",
+        "en": "Run as administrator",
+    },
+    "set.run_as_admin_hint": {
+        "ru": "Без прав администратора winws.exe не запускается, и диагностика "
+              "стратегий пишет «нет доступа». Поставьте галочку — программа "
+              "перезапустится с запросом прав Windows.",
+        "en": "Without administrator rights winws.exe will not start and the "
+              "strategy diagnostics reports no access. Tick the box and the "
+              "app will restart with a Windows elevation prompt.",
+    },
+    "status.active": {"ru": "Активен", "en": "Active"},
+    "status.inactive": {"ru": "Не активен", "en": "Inactive"},
+    "status.arc_hint": {
+        "ru": "Полукруг показывает состояние обходов: зелёный — работает, серый — выключен. Пузырьки слева и справа — zapret и TG WS Proxy.",
+        "en": "The arc shows the bypass state: green when running, grey when stopped. The bubbles on the left and right are zapret and TG WS Proxy.",
+    },
     "status.all_stopped": {"ru": "Все компоненты остановлены", "en": "All components stopped"},
     "status.some_running": {"ru": "Компоненты работают", "en": "Components running"},
-    "quit.confirm": {
-        "ru": "Компоненты ещё работают. Остановить их и выйти?",
-        "en": "Components are still running. Stop them and quit?",
+    "quit.confirm_keep_running": {
+        "ru": "Zapret и TG WS Proxy ещё работают.\n\nВыйти — обходы продолжат работать в фоне, пока вы их не остановите.\nВыйти и остановить обходы?",
+        "en": "Zapret and TG WS Proxy are still running.\n\nQuitting leaves the bypasses running in the background until you stop them.\nQuit and stop the bypasses?",
+    },
+    "settings.stop_on_quit": {
+        "ru": "Останавливать обходы при выходе",
+        "en": "Stop bypasses on exit",
+    },
+    "settings.stop_on_quit_hint": {
+        "ru": "По умолчанию выключено: обходы продолжают работать после закрытия программы, как обычные .bat-файлы. При обновлении или удалении программы они останавливаются сами.",
+        "en": "Off by default: bypasses keep running after you close the program, just like plain .bat files. They are stopped automatically when the program is updated or removed.",
     },
     "common.start": {"ru": "Запустить", "en": "Start"},
     "common.stop": {"ru": "Остановить", "en": "Stop"},
@@ -95,6 +136,8 @@ STRINGS: Dict[str, Dict[str, str]] = {
     # ---- навигация ----
 
     # ---- страница компонентов ----
+    "components.collapse": {"ru": "Свернуть панель", "en": "Collapse panel"},
+    "components.expand": {"ru": "Развернуть панель", "en": "Expand panel"},
     "components.title": {"ru": "Компоненты", "en": "Components"},
     "components.subtitle": {
         "ru": "Настройки каждого обхода блокировок отдельно",
@@ -111,6 +154,43 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "nav.diagnostics": {"ru": "Диагностика", "en": "Diagnostics"},
 
     # ---- страница диагностики ----
+    "diag.expand_hint": {"ru": "Показать подробности", "en": "Show details"},
+    "diag.collapse_hint": {"ru": "Скрыть подробности", "en": "Hide details"},
+    "diag.pick_all_hint": {
+        "ru": "Отметить все стратегии для проверки",
+        "en": "Select every strategy for testing",
+    },
+    "diag.pick_none_hint": {
+        "ru": "Снять все отметки",
+        "en": "Clear every selection",
+    },
+    "diag.tested_count": {"ru": "проверено: {count}", "en": "tested: {count}"},
+    "diag.not_tested_short": {
+        "ru": "ещё не проверялась",
+        "en": "not tested yet",
+    },
+    "diag.rank_hint": {
+        "ru": "Место в рейтинге после прогона. Прочерк — стратегия не проверялась в этом прогоне.",
+        "en": "Rank after the sweep. A red cross means the strategy was not tested.",
+    },
+    "diag.only_picked": {
+        "ru": "показаны только отмеченные",
+        "en": "only the picked ones are shown",
+    },
+    "diag.log_targets": {
+        "ru": "По целям:",
+        "en": "By target:",
+    },
+    "diag.log_hide": {
+        "ru": "Скрыть журнал",
+        "en": "Hide log",
+    },
+    "diag.not_tested_yet": {
+        "ru": "Эта стратегия ещё не проверялась. Нажмите «Протестировать» на её карточке или запустите общий прогон.",
+        "en": "This strategy has not been tested yet. Press Test on its card or run the full sweep.",
+    },
+    "diag.targets_show": {"ru": "Показать список", "en": "Show list"},
+    "diag.targets_hide": {"ru": "Скрыть список", "en": "Hide list"},
     "diag.title": {"ru": "Диагностика", "en": "Diagnostics"},
     "diag.subtitle": {
         "ru": "Перебор всех стратегий general*.bat и выбор самой быстрой для вашего соединения",
@@ -127,8 +207,111 @@ STRINGS: Dict[str, Dict[str, str]] = {
     },
     "diag.start": {"ru": "Протестировать все", "en": "Test all"},
     "diag.stop": {"ru": "Остановить", "en": "Stop"},
+    "diag.skip": {"ru": "Пропустить", "en": "Skip"},
+    "diag.skip_hint": {
+        "ru": "Пропустить стратегию, которая проверяется прямо сейчас, и перейти к следующей",
+        "en": "Skip the strategy being tested right now and move to the next one",
+    },
+    "diag.probe": {"ru": "Проверить запуск", "en": "Check start"},
+    "diag.probe_hint": {
+        "ru": "Запустить текущую стратегию на 3 секунды и показать, что с ней не так: "
+              "права, служба zapret, код выхода winws.exe и его собственный вывод",
+        "en": "Run the current strategy for 3 seconds and show what is wrong with it: "
+              "rights, the zapret service, the winws.exe exit code and its own output",
+    },
+    "diag.probe_running": {
+        "ru": "ПРОВЕРЯЮ ЗАПУСК",
+        "en": "CHECKING START",
+    },
+    "diag.probe_wait": {
+        "ru": "Запускаю winws.exe на три секунды и смотрю, удержится ли он…",
+        "en": "Starting winws.exe for three seconds and checking whether it stays up…",
+    },
+    "diag.probe_ok_title": {
+        "ru": "СТРАТЕГИЯ ЗАПУСКАЕТСЯ",
+        "en": "THE STRATEGY STARTS",
+    },
+    "diag.probe_ok_body": {
+        "ru": "winws.exe стартовал и продолжал работать три секунды — значит права и "
+              "файлы в порядке. Если сайты всё равно не открываются, дело в самой "
+              "стратегии: запустите полный перебор.",
+        "en": "winws.exe started and kept running for three seconds, so rights and files "
+              "are fine. If sites still do not open, it is the strategy itself: run the "
+              "full sweep.",
+    },
+    "diag.probe_fail_title": {
+        "ru": "СТРАТЕГИЯ НЕ ЗАПУСКАЕТСЯ",
+        "en": "THE STRATEGY DOES NOT START",
+    },
+    "diag.probe_exit": {
+        "ru": "winws.exe сразу завершился с кодом {code}.",
+        "en": "winws.exe exited immediately with code {code}.",
+    },
+    "diag.probe_died": {
+        "ru": "winws.exe не удержался работающим.",
+        "en": "winws.exe did not stay running.",
+    },
+    "diag.probe_command": {
+        "ru": "Командная строка: {command}",
+        "en": "Command line: {command}",
+    },
+    "diag.skipped": {
+        "ru": "Пропущено — нажали «Пропустить»",
+        "en": "Skipped — you pressed Skip",
+    },
+    "diag.stopping_service": {
+        "ru": "Служба zapret активна ({state}) — останавливаю её на время прогона",
+        "en": "The zapret service is {state} — stopping it for the test run",
+    },
+    "diag.service_stopped": {
+        "ru": "Служба zapret остановлена, перебираю стратегии",
+        "en": "The zapret service is stopped, testing strategies",
+    },
+    "diag.service_stop_failed": {
+        "ru": "Не удалось остановить службу zapret — стратегии могут не запуститься",
+        "en": "Could not stop the zapret service — strategies may fail to start",
+    },
+    "diag.restoring_service": {
+        "ru": "Возвращаю службу zapret на место",
+        "en": "Restoring the zapret service",
+    },
+    "diag.service_restored": {
+        "ru": "Служба zapret снова запущена",
+        "en": "The zapret service is running again",
+    },
+    "diag.service_restore_failed": {
+        "ru": "Не удалось вернуть службу zapret — запустите её вручную",
+        "en": "Could not restore the zapret service — start it manually",
+    },
+    "diag.retry_dead": {
+        "ru": "{name}: не запустилась, пробую ещё раз",
+        "en": "{name}: did not start, retrying",
+    },
+    "diag.dead_process": {
+        "ru": "winws не запустился",
+        "en": "winws did not start",
+    },
+    "diag.progress_count": {
+        "ru": "Проверено {done} из {total}",
+        "en": "Tested {done} of {total}",
+    },
+    "diag.progress_spent": {
+        "ru": "прошло {minutes:.1f} мин",
+        "en": "{minutes:.1f} min spent",
+    },
+    "diag.progress_left": {
+        "ru": "осталось ~{minutes:.1f} мин",
+        "en": "~{minutes:.1f} min left",
+    },
+    "diag.runner_up": {
+        "ru": "{position}-е место: {name} — {percent}%",
+        "en": "#{position}: {name} — {percent}%",
+    },
+    "diag.leader_now": {
+        "ru": "Лидер на данный момент: {name} — {percent}%",
+        "en": "Leader so far: {name} — {percent}%",
+    },
     "diag.strategies": {"ru": "Стратегии general*.bat", "en": "general*.bat strategies"},
-    "diag.hide_strategies": {"ru": "Скрыть стратегии", "en": "Hide strategies"},
     "diag.now_testing": {
         "ru": "СЕЙЧАС ПРОВЕРЯЕТСЯ",
         "en": "CURRENTLY TESTING",
@@ -141,25 +324,9 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "ru": "По одной цели на строку. Как в utils/targets.txt пакета: «Имя = https://сайт» — проверяем HTTP/1.1, TLS 1.2, TLS 1.3 и ping; «Имя = PING:адрес» — только ping. Можно и просто «сайт» или «сайт:порт». Если цель не ответила за 10 секунд, остальные её проверки не делаются и считаются «нет ответа». Выше в списке та стратегия, которая открыла больше целей и отвечает быстрее.",
         "en": "One target per line, same as the package's utils/targets.txt: \"Name = https://site\" checks HTTP/1.1, TLS 1.2, TLS 1.3 and ping; \"Name = PING:address\" pings only. A plain \"site\" or \"site:port\" works too. If a target does not answer within 10 seconds, its remaining checks are skipped and counted as no answer. Higher in the list goes the strategy that answered more targets and answered faster.",
     },
-    "diag.targets_count": {
-        "ru": "Целей: {count} · проверок на стратегию: {checks}",
-        "en": "Targets: {count} · checks per strategy: {checks}",
-    },
     "diag.targets_empty": {
         "ru": "Список пуст — тестировать нечем. Верните стандартные сайты кнопкой ниже.",
         "en": "The list is empty, there is nothing to test. Restore the default sites with the button below.",
-    },
-    "diag.targets_reset": {
-        "ru": "Стандартные сайты",
-        "en": "Default sites",
-    },
-    "diag.targets_reset_hint": {
-        "ru": "Вернуть список сайтов из utils/targets.txt пакета",
-        "en": "Restore the site list from the package's utils/targets.txt",
-    },
-    "diag.targets_restored": {
-        "ru": "Список целей взят из utils/targets.txt пакета",
-        "en": "Target list taken from the package's utils/targets.txt",
     },
     "diag.best_choice": {
         "ru": "ЛУЧШИЙ ВЫБОР",
@@ -178,17 +345,9 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "ru": "Снять отметки со всех стратегий",
         "en": "Clear every strategy selection",
     },
-    "diag.picked_count": {
-        "ru": "Отмечено стратегий: {count}",
-        "en": "Strategies selected: {count}",
-    },
     "diag.nothing_picked": {
         "ru": "Не отмечено ни одной стратегии — отметьте хотя бы одну",
         "en": "No strategy selected — pick at least one",
-    },
-    "diag.auto_applied": {
-        "ru": "По итогам прогона применена стратегия",
-        "en": "Strategy applied from the run results",
     },
     "diag.auto_applied_toast": {
         "ru": "Автоматически применена лучшая стратегия: {name} — ответили {percent}% проверок",
@@ -215,27 +374,63 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "diag.avg": {"ru": "Среднее", "en": "Avg"},
     "diag.fastest": {"ru": "Быстрее всего", "en": "Fastest"},
     "diag.no_access": {"ru": "Нет доступа", "en": "No access"},
+    "diag.sites_unreachable": {
+        "ru": "Сайты не открылись — причина в журнале",
+        "en": "Sites did not open — see the log for the reason",
+    },
+    "diag.no_targets": {
+        "ru": "Нечего проверять — список целей пуст",
+        "en": "Nothing to test — the target list is empty",
+    },
+    "diag.log_start": {
+        "ru": "Запуск стратегии (журнал компонента):",
+        "en": "Strategy start (component log):",
+    },
     "diag.choose": {"ru": "Выбрать", "en": "Choose"},
     "diag.test_one": {
         "ru": "Протестировать только эту стратегию",
         "en": "Test only this strategy",
     },
-    "diag.no_log": {
-        "ru": "Эта стратегия ещё не проверялась.",
-        "en": "This strategy has not been tested yet.",
-    },
     "diag.choose_hint": {"ru": "Сделать эту стратегию текущей", "en": "Make this the current strategy"},
-    "diag.row_hint": {
-        "ru": "Нажмите, чтобы протестировать только эту стратегию",
-        "en": "Click to test only this strategy",
-    },
-    "diag.started": {"ru": "Запуск автоподбора", "en": "Auto picker started"},
-    "diag.stopped": {"ru": "Автоподбор остановлен", "en": "Auto picker stopped"},
-    "diag.trying": {"ru": "Проверяю стратегию", "en": "Testing strategy"},
     "diag.start_failed": {"ru": "Не удалось запустить", "en": "Failed to start"},
-    "diag.best_found": {"ru": "Лучшая стратегия", "en": "Best strategy"},
+    "diag.cannot_test": {"ru": "ПРОВЕРИТЬ НЕЛЬЗЯ", "en": "CANNOT TEST"},
+    "diag.admin_title": {
+        "ru": "Нужны права администратора",
+        "en": "Administrator rights required",
+    },
+    "diag.admin_hint": {
+        "ru": "winws.exe работает через WinDivert и без прав администратора не "
+              "запускается — все стратегии сразу получают «нет доступа». "
+              "Нажмите кнопку, программа перезапустится с повышением прав.",
+        "en": "winws.exe uses WinDivert and will not start without "
+              "administrator rights, so every strategy reports no access. "
+              "Press the button and the app will restart elevated.",
+    },
+    "diag.admin_relaunch": {
+        "ru": "Предоставить доступ",
+        "en": "Grant access",
+    },
+    "diag.admin_relaunch_hint": {
+        "ru": "Перезапустить Zapret Hub от имени администратора",
+        "en": "Restart Zapret Hub as administrator",
+    },
+    "diag.admin_failed": {
+        "ru": "Не удалось повысить права: UAC отклонён или недоступен",
+        "en": "Could not elevate: UAC was declined or is unavailable",
+    },
+    "diag.admin_needed": {
+        "ru": "Нужны права администратора — нажмите «Предоставить доступ» выше",
+        "en": "Administrator rights required — press Grant access above",
+    },
+    "diag.service_conflict": {
+        "ru": "Служба Windows «{name}» мешает запуску — уберите её в службах",
+        "en": "Windows service «{name}» blocks the start — remove it in Services",
+    },
+    "diag.exe_missing": {
+        "ru": "Не найден {name} — переустановите компонент",
+        "en": "{name} not found — reinstall the component",
+    },
     "diag.no_best": {"ru": "Рабочих стратегий не найдено", "en": "No working strategy found"},
-    "diag.applied": {"ru": "Стратегия применена", "en": "Strategy applied"},
     "diag.bar_hint": {
         "ru": "График проверок: ответили {percent}% из {count} проверок. "
               "Зелёный — ответ быстрее {slow} мс, жёлтый — медленный ответ, "
@@ -335,6 +530,10 @@ STRINGS: Dict[str, Dict[str, str]] = {
     },
     "zapret.game_filter": {"ru": "Game Filter (порты игр)", "en": "Game Filter (game ports)"},
     "zapret.game_mode": {"ru": "Режим", "en": "Mode"},
+    "zapret.game_mode_disabled": {"ru": "выключен", "en": "disabled"},
+    "zapret.game_mode_tcp": {"ru": "только TCP", "en": "TCP only"},
+    "zapret.game_mode_udp": {"ru": "только UDP", "en": "UDP only"},
+    "zapret.game_mode_all": {"ru": "TCP и UDP", "en": "TCP and UDP"},
     "zapret.game_disabled": {"ru": "Выключен", "en": "Disabled"},
     "zapret.game_all": {"ru": "TCP и UDP", "en": "TCP and UDP"},
     "zapret.game_tcp": {"ru": "Только TCP", "en": "TCP only"},
@@ -444,6 +643,44 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "tgws.port_invalid": {"ru": "Некорректный порт (1–65535)", "en": "Invalid port (1-65535)"},
 
     # ---- обновления ----
+    "appupd.title": {"ru": "Обновление программы", "en": "Program update"},
+    "appupd.dialog_title": {"ru": "Обновление Zapret Hub", "en": "Zapret Hub update"},
+    "appupd.installed": {"ru": "Установлено", "en": "Installed"},
+    "appupd.latest": {"ru": "Доступно на GitHub", "en": "Available on GitHub"},
+    "appupd.whats_new": {"ru": "Что изменилось", "en": "What changed"},
+    "appupd.available": {
+        "ru": "Доступна версия {version}. Нажмите «Обновить» — программа скачает установщик, закроется и запустит его.",
+        "en": "Version {version} is available. Press Update — the program downloads the installer, closes and runs it.",
+    },
+    "appupd.up_to_date": {"ru": "Актуальная версия", "en": "Up to date"},
+    "appupd.no_notes": {
+        "ru": "Автор не добавил описание к этому релизу.",
+        "en": "The author did not add release notes.",
+    },
+    "appupd.no_asset": {
+        "ru": "В релизе не нашлось установщика ZapretHub-Setup-*.exe — скачайте его вручную со страницы релиза.",
+        "en": "No ZapretHub-Setup-*.exe found in the release — download it manually from the release page.",
+    },
+    "appupd.downloading": {"ru": "Скачиваю установщик…", "en": "Downloading the installer…"},
+    "appupd.download_failed": {"ru": "Не удалось скачать", "en": "Download failed"},
+    "appupd.launching": {
+        "ru": "Установщик скачан. Запускаю его и закрываю программу…",
+        "en": "Installer downloaded. Running it and closing the program…",
+    },
+    "appupd.launch_failed": {
+        "ru": "Не удалось запустить установщик. Откройте скачанный файл вручную.",
+        "en": "Could not run the installer. Open the downloaded file manually.",
+    },
+    "appupd.check_timeout": {
+        "ru": "GitHub не ответил. Попробуйте позже или укажите прокси в настройках обновлений.",
+        "en": "GitHub did not answer. Try later or set a proxy in the update settings.",
+    },
+    "appupd.network_hint": {
+        "ru": "Если GitHub недоступен, укажите прокси в «Настройки → Обновления» (например http://127.0.0.1:2080).",
+        "en": "If GitHub is unreachable, set a proxy in Settings → Updates (e.g. http://127.0.0.1:2080).",
+    },
+    "appupd.open_page": {"ru": "Страница релиза", "en": "Release page"},
+    "appupd.install": {"ru": "Обновить", "en": "Update"},
     "upd.title": {"ru": "Обновления компонентов", "en": "Component updates"},
 
     "upd.dialog_title": {"ru": "Обновление компонентов", "en": "Update components"},
@@ -515,14 +752,6 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "set.autostart_zapret": {"ru": "Вместе с программой запускать Zapret", "en": "Start Zapret with the app"},
     "set.autostart_tgws": {"ru": "Вместе с программой запускать TG WS Proxy", "en": "Start TG WS Proxy with the app"},
     "set.autostart_delay": {"ru": "Задержка запуска компонентов (сек)", "en": "Component start delay (sec)"},
-    "set.autostart_elevated": {
-        "ru": "Запускать от имени администратора (необходимо для Zapret)",
-        "en": "Run as administrator (required for Zapret)",
-    },
-    "set.autostart_hint": {
-        "ru": "Автозапуск добавляет запись в реестр (HKCU\\...\\Run) с параметром «--tray»: программа стартует свёрнутой в трей и поднимает компоненты.",
-        "en": "Autostart adds a registry entry (HKCU\\...\\Run) with '--tray': the app starts minimized to tray and brings up the components.",
-    },
     "set.autostart_applied": {"ru": "Настройки автозапуска сохранены", "en": "Autostart settings saved"},
     "set.autostart_registry_error": {
         "ru": "Не удалось изменить запись автозапуска в реестре",
@@ -531,18 +760,39 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "set.paths": {"ru": "Расположение", "en": "Locations"},
     "set.components_dir": {"ru": "Папка компонентов", "en": "Components folder"},
     "set.data_dir": {"ru": "Папка данных", "en": "Data folder"},
-    "set.mode_installed": {
-        "ru": "Установленный режим: данные лежат в профиле пользователя, "
-              "папка программы остаётся неизменяемой.",
-        "en": "Installed mode: data lives in the user profile, "
-              "the program folder stays read-only.",
+    "set.logs_dir": {"ru": "Папка логов", "en": "Logs folder"},
+    "set.maintenance": {"ru": "Обслуживание", "en": "Maintenance"},
+    "set.uninstall": {"ru": "Удалить программу", "en": "Uninstall program"},
+    "set.uninstall_hint": {
+        "ru": "Запустит деинсталлятор unins000.exe из папки программы. Настройки, журналы и скачанные компоненты удалятся вместе с программой.",
+        "en": "Runs unins000.exe from the program folder. Settings, logs and downloaded components are removed together with the program.",
     },
-    "set.mode_portable": {
-        "ru": "Портабельный режим: данные лежат рядом с программой "
-              "(рядом найден файл portable.txt).",
-        "en": "Portable mode: data lives next to the program "
-              "(a portable.txt file was found beside it).",
+    "set.uninstall_ready": {
+        "ru": "Деинсталлятор найден: кнопка ниже запустит стандартное удаление Windows.",
+        "en": "Uninstaller found: the button below starts the standard Windows removal.",
     },
+    "set.uninstall_missing": {
+        "ru": "Деинсталлятор не найден. Кнопка удаления работает только для копии, установленной через установщик; при запуске из исходников просто удалите папку проекта.",
+        "en": "No uninstaller found. The button works only for a copy installed with the installer; when running from source just delete the project folder.",
+    },
+    "set.uninstall_confirm": {
+        "ru": "Удалить Zapret Hub?\n\nПрограмма закроется, запустится деинсталлятор. Настройки, журналы и скачанные компоненты будут удалены.",
+        "en": "Uninstall Zapret Hub?\n\nThe program will close and the uninstaller will start. Settings, logs and downloaded components will be removed.",
+    },
+    "set.folder_failed": {
+        "ru": "Не удалось открыть папку:\n{path}",
+        "en": "Could not open the folder:\n{path}",
+    },
+    "set.url_failed": {
+        "ru": "Не удалось открыть ссылку в браузере",
+        "en": "Could not open the link in your browser",
+    },
+    "set.app_update": {"ru": "Проверить обновление программы", "en": "Check for program update"},
+    "set.app_update_hint": {
+        "ru": "Сравнивает версию программы с тегом последнего релиза на GitHub и показывает, что изменилось.",
+        "en": "Compares the program version with the latest GitHub release tag and shows what changed.",
+    },
+    "set.app_repo": {"ru": "Репозиторий Zapret Hub", "en": "Zapret Hub repository"},
     "set.about": {"ru": "О программе", "en": "About"},
     "set.settings_saved": {"ru": "Настройки сохранены", "en": "Settings saved"},
 

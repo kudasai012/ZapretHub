@@ -67,7 +67,7 @@ class ZapretPanel(ComponentPanel):
     def _build(self) -> None:
         self.warning_banner = Banner("", "warning")
         self.warning_banner.setVisible(False)
-        self.remove_service_button = IconButton("trash", tr("zapret.service_remove"), "danger")
+        self.remove_service_button = IconButton("trash", tr("zapret.service_remove"), "glassDanger")
         self.remove_service_button.setVisible(False)
         self.remove_service_button.clicked.connect(self._remove_service)
         self.warning_banner.layout().addWidget(self.remove_service_button)
@@ -85,7 +85,7 @@ class ZapretPanel(ComponentPanel):
         self.add_widget(strategy_box)
 
         # --- game filter ---
-        self.game_apply_button = IconButton("check", tr("common.apply"), "primary")
+        self.game_apply_button = IconButton("check", tr("common.apply"), "glassPrimary")
         self.game_apply_button.clicked.connect(self._apply_game_filter)
         game_box = QGroupBox(tr("zapret.game_filter"))
         g_layout = QVBoxLayout(game_box)
@@ -123,7 +123,7 @@ class ZapretPanel(ComponentPanel):
             self.ipset_combo.addItem(tr(label_key), mode)
         self.ipset_combo.currentIndexChanged.connect(self._on_ipset_changed)
         top.addWidget(self.ipset_combo, 1)
-        self.ipset_update_button = IconButton("download", tr("zapret.ipset_update"))
+        self.ipset_update_button = IconButton("download", tr("zapret.ipset_update"), "glass")
         self.ipset_update_button.clicked.connect(self._update_ipset)
         top.addWidget(self.ipset_update_button)
         i_layout.addLayout(top)
@@ -131,7 +131,7 @@ class ZapretPanel(ComponentPanel):
         # --- сбор IP заблокированных провайдеров по ASN ---
         asn_row = QHBoxLayout()
         asn_row.setSpacing(10)
-        self.asn_button = IconButton("globe", tr("zapret.asn_collect"), "ghost")
+        self.asn_button = IconButton("globe", tr("zapret.asn_collect"), "glass")
         self.asn_button.setToolTip(tr("zapret.asn_hint"))
         self.asn_button.clicked.connect(self._collect_asn)
 
@@ -166,7 +166,7 @@ class ZapretPanel(ComponentPanel):
         self.list_edit = QPlainTextEdit()
         self.list_edit.setMaximumHeight(130)
         l_layout.addWidget(self.list_edit)
-        self.save_list_button = IconButton("check", tr("common.save"), "primary")
+        self.save_list_button = IconButton("check", tr("common.save"), "glassPrimary")
         self.save_list_button.clicked.connect(self._save_user_list)
         l_layout.addWidget(self.save_list_button, 0, Qt.AlignLeft)
         self.add_widget(lists_box)
