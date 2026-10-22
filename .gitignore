@@ -21,6 +21,7 @@ components/
 *.zip
 *.exe
 *.7z
+build-exe.bat
 *.rar
 tmp/
 
