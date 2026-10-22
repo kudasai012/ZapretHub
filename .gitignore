@@ -1,42 +1,38 @@
-# --- Python ---
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
+# ---------------------------------------------------------------- что игнорируем
+# В репозитории — только то, что написано руками. Всё, что получается в
+# процессе сборки, запуска или скачивания, живёт на машине и в git не едет.
 
-# --- скачанные компоненты (их тянет само приложение, в репозиторий не нужны) ---
-components/
-
-# --- данные приложения ---
-data/config.json
-data/components.json
-data/logs/
-data/backups/
-data/tmp/
-data/hub.lock
-
-# --- личное: сборка остаётся на машине автора ---
-# в репозиторий идут только исходники, exe и установщик — через Releases
-build_exe.bat
-build_installer.bat
-installer/
-
-# --- сборка ---
-build/
+# Пакеты и результаты сборки
+node_modules/
+out/
 dist/
-*.spec.bak
-ZapretHub.spec
+release/
+launcher/
 
-# --- аварийные журналы (пишет app/crashlog.py) ---
-crash.log
-logs/*.out.log
+# Что программа создаёт, работая из исходников
+data/
+components/
+*.log
 
-# --- прочее ---
+# Служебные файлы TypeScript (пересобираются сами)
+*.tsbuildinfo
+
+# Скачанное и собранное вручную: установщики, архивы, дампы
+*.zip
+*.exe
+*.7z
+*.rar
+tmp/
+
+# Настройки редакторов и системы
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
 Thumbs.db
-.idea/
-.vscode/
 
-# --- превью README (генерируется tools/preview_readme.py) ---
-docs/readme-preview.html
+# Личное: пароли, токены, локальные переопределения
+.env
+.env.*
+*.local

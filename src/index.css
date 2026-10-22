@@ -1,0 +1,124 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Палитра — shadcn/ui, вариант zinc.
+ *
+ * Нейтральная база и один белый акцент: цвет в интерфейсе остаётся только у
+ * признаков (работает / не работает / сбой), и поэтому сразу видно, о чём он
+ * говорит. Ни одного градиента.
+ */
+@layer base {
+  :root {
+    /* Родные элементы — поля, списки, полосы прокрутки — должны быть тёмными
+       вместе с нашим интерфейсом. Без этого Chromium рисует их по своей
+       светлой схеме, и поле ввода целей выглядело белым пятном на тёмной
+       странице. */
+    color-scheme: dark;
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 4.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 4.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 10% 3.9%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 160 84% 39%;
+    --warning: 38 92% 50%;
+    --danger: 0 84.2% 60.2%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter var', Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+    font-feature-settings: 'cv11', 'ss01';
+    font-variation-settings: 'opsz' 32;
+    /* Окно без рамки: тащить его можно за верхнюю полосу. */
+    overflow: hidden;
+  }
+
+  /*
+   * Полосы прокрутки: тонкие, без жёлоба, бегунок цинковый со скруглением.
+   *
+   * cursor: default — не прихоть. Полоса прокрутки принадлежит элементу под
+   * ней, и у поля ввода она рисовалась текстовой кареткой: наводишь на
+   * полосу, чтобы проскроллить, а курсор говорит «тут печатают». Курсор
+   * полосы теперь всегда обычная стрелка.
+   */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    cursor: default;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(240 3.7% 20%);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    cursor: default;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    cursor: default;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(240 5% 34%);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::selection {
+    background: hsl(240 3.7% 25%);
+  }
+
+  /* Фокус виден всегда, но только у того, кто управляется с клавиатуры. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer utilities {
+  .titlebar-drag {
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+  .titlebar-no-drag {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+  /* Текст с косичкой обрезки — используется в таблицах диагностики. */
+  .truncate-cell {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

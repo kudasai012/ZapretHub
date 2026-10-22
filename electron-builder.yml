@@ -1,0 +1,72 @@
+# Сборка установщика.
+#
+# Ставим на всю машину в C:\Program Files\Zapret Hub — та же папка, что и у
+# прежней версии, и то же требование к правам: winws.exe работает через
+# WinDivert и без администратора не стартует.
+appId: hub.zapret.app
+productName: Zapret Hub
+copyright: Zapret Hub
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - out/**
+  - package.json
+  # Иконка рядом с кодом: главный процесс берёт её от __dirname, а не от папки
+  # программы — в собранном приложении рядом с exe её нет, а в трее иконка
+  # должна быть всегда (см. appIconPath в electron/main/index.ts).
+  - build/icon.png
+  - build/icon.ico
+  - '!**/*.map'
+  # Ничего из node_modules в программу не нужно: интерфейс собран в один
+  # бандл, а главный процесс берёт только встроенные модули Node и electron.
+  # Без этого в asar уезжали Radix и lucide-react — двенадцать мегабайт
+  # мёртвого веса.
+  - '!node_modules/**'
+
+# resources нельзя тянуть в asar: программа читает компоненты с диска, а
+# winws.exe должен запускаться из распакованной папки.
+asarUnpack:
+  - '**/*.node'
+
+win:
+  # Программа всегда работает с повышением прав: winws.exe требует WinDivert,
+  # а без администратора он не стартует. Указано здесь, чтобы UAC спрашивал
+  # сразу при запуске, а не при первой попытке поднять обход.
+  requestedExecutionLevel: requireAdministrator
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ZapretHub-${version}-Setup.${ext}
+  # иконка окна и панели задач
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: true
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Zapret Hub
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  # имя деинсталлятора то же, что у прежней версии: кнопка «Удалить программу»
+  # ищет именно unins000.exe рядом с exe
+  uninstallDisplayName: Zapret Hub
+  deleteAppDataOnUninstall: false
+  include: build/installer.nsh
+
+publish:
+  provider: github
+  owner: kudasai012
+  repo: ZapretHub
+
+# Чистка после сборки: убирает чужие языки Chromium. Сам файл лежит в build/
+# и должен ехать вместе с icon.ico.
+afterPack: build/after-pack.js
+
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
