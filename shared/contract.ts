@@ -140,6 +140,22 @@ export interface DiagnosticsTargetResult {
   error: string
 }
 
+/** Итог одной проверки системы. */
+export type SysStatus = 'ok' | 'warn' | 'fail' | 'info'
+
+/** Что можно починить кнопкой. */
+export type SysFix = 'windivert' | 'conflicts' | 'zapret-service' | 'timestamps' | 'discord'
+
+export interface SysCheck {
+  /** Устойчивое имя: по нему интерфейс берёт подпись из своего словаря. */
+  id: string
+  status: SysStatus
+  /** Данные проверки: что именно нашли. Показывается как есть. */
+  detail: string
+  /** Есть ли кнопка «починить». */
+  fix?: SysFix
+}
+
 export interface UpdateInfo {
   key: ComponentKey
   current: string
@@ -296,6 +312,13 @@ export interface HubApi {
     }>
     /** Остановить идущий прогон: обходы гасятся, прежняя стратегия вернётся. */
     stop(): Promise<{ ok: boolean; reason: string }>
+  }
+
+  sysdiag: {
+    /** Проверки системы: то же, что делает service.bat пакета zapret. */
+    run(): Promise<SysCheck[]>
+    /** Починить то, что можно: служба WinDivert, чужие обходы, кэш Discord. */
+    fix(id: SysFix): Promise<{ ok: boolean; message: string }>
   }
 
   updates: {

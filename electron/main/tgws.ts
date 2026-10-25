@@ -169,6 +169,14 @@ export class TgWsComponent {
       args: ['--portable'],
       cwd: this.dir,
       logName: 'tgws.log',
+      // TgWsProxy в портативном режиме распаковывает копию себя, и процесс,
+      // который остаётся висеть в трее, называется не так, как файл, который
+      // мы запустили. Раньше из-за этого «завершить задачу» гасило zapret, а
+      // прокси продолжал висеть: и по имени образа его не взять, и по номеру —
+      // запущенный нами процесс к тому времени уже вышел. Поэтому добиваем по
+      // подстроке в пути («TgWsProxy») и по порту, который он слушает.
+      killNeedle: 'TgWsProxy',
+      killPort: configStore.get().tgws.port,
       onLog: (line) => logger.writeTo('tgws.log', line),
       onStatus: (status) => {
         if (status === 'crashed') this.reason = this.proc?.currentReason || 'процесс завершился'

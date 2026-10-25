@@ -82,6 +82,25 @@ const WINWS_KNOWN_FAILURES: [string, string][] = [
   ['could not read', 'winws не смог прочитать свои файлы — переустановите компонент zapret']
 ]
 
+/**
+ * Причины, после которых имеет смысл попробовать ещё раз.
+ *
+ * «Фильтр WinDivert занят предыдущей копией» — не поломка, а тормоза: ядро
+ * удаляет фильтр не в тот же миг, когда убит процесс winws. Раньше программа
+ * показывала эту ошибку и сдавалась, и человеку оставалось только перезагружать
+ * компьютер. Теперь такие отзывы повторяются с паузой.
+ */
+const BUSY_FILTER = /фильтр WinDivert занят|другая копия winws|error opening filter|same filter/i
+
+/** Сколько ждём, пока ядро отпустит фильтр убитой копии winws. */
+const WINDIVERT_SETTLE_MS = 1200
+
+/** Сколько ждём после убийства чужого winws.exe. */
+const FOREIGN_KILL_SETTLE_MS = 900
+
+/** Сколько раз пробуем запустить winws, если фильтр ещё занят. */
+const START_ATTEMPTS = 4
+
 /** Человеческая причина провала по тому, что написал сам winws. */
 export function winwsFailureReason(output: string[]): string {
   for (const line of output) {
@@ -496,9 +515,49 @@ export class ZapretComponent {
     const killed = await killForeignProcesses('winws', this.ownPids())
     if (killed.length > 0) {
       this.log(`остановлен сторонний winws.exe (PID ${killed.join(', ')}) — запускаю свой`)
-      await sleep(600)
+      await sleep(FOREIGN_KILL_SETTLE_MS)
     }
     return killed
+  }
+
+  /**
+   * Одна попытка запустить winws.
+   *
+   * Отдельно от start(), потому что при занятом фильтре WinDivert запуск нужно
+   * повторить, а ManagedProcess одноразовый — зато его можно создать заново.
+   */
+  private async spawnWinws(parsed: { exe: string; args: string[] }): Promise<{ ok: boolean; reason: string }> {
+    const output: string[] = []
+    this.proc = new ManagedProcess({
+      key: 'zapret',
+      command: parsed.exe,
+      args: parsed.args,
+      cwd: this.dir,
+      logName: 'zapret.log',
+      onLog: (line) => {
+        output.push(line)
+        logger.writeTo('zapret.log', line)
+      },
+      onStatus: (status) => {
+        if (status === 'crashed') {
+          this.reason = this.proc?.currentReason || winwsFailureReason(output) || 'процесс завершился'
+        } else if (status === 'running') {
+          this.reason = ''
+        }
+      }
+    })
+    this.proc.start()
+
+    // winws подтверждает работу через пару сотен миллисекунд: раньше этого
+    // срока отказ «A copy of winws is already running» уже пришёл бы.
+    await sleep(START_CONFIRM_SECONDS)
+    if (this.proc.currentStatus === 'crashed') {
+      return {
+        ok: false,
+        reason: winwsFailureReason(output) || this.proc.currentReason || 'процесс завершился'
+      }
+    }
+    return { ok: true, reason: '' }
   }
 
   async start(): Promise<{ ok: boolean; reason: string }> {
@@ -549,37 +608,26 @@ export class ZapretComponent {
       return { ok: false, reason: this.reason }
     }
 
-    const output: string[] = []
-    this.proc = new ManagedProcess({
-      key: 'zapret',
-      command: parsed.exe,
-      args: parsed.args,
-      cwd: this.dir,
-      logName: 'zapret.log',
-      onLog: (line) => {
-        output.push(line)
-        logger.writeTo('zapret.log', line)
-      },
-      onStatus: (status) => {
-        if (status === 'crashed') {
-          this.reason = this.proc?.currentReason || winwsFailureReason(output) || 'процесс завершился'
-        } else if (status === 'running') {
-          this.reason = ''
-        }
+    // Запуск с повторами. «Фильтр WinDivert занят предыдущей копией» — это не
+    // поломка, а тормоза ядра: процесс предыдущей копии уже убит, а фильтр за
+    // ним держится ещё какой-то миг. Раньше программа показывала эту ошибку и
+    // сдавалась, и человек шёл перезагружать компьютер. Теперь пробуем снова:
+    // почти всегда хватает второй попытки, и обход включается сам.
+    for (let attempt = 1; ; attempt += 1) {
+      const started = await this.spawnWinws(parsed)
+      if (started.ok) {
+        this.reason = ''
+        return { ok: true, reason: '' }
       }
-    })
-    this.proc.start()
-
-    // winws подтверждает работу через пару сотен миллисекунд: раньше этого
-    // срока отказ «A copy of winws is already running» уже пришёл бы.
-    await sleep(START_CONFIRM_SECONDS)
-    if (this.proc.currentStatus === 'crashed') {
-      this.reason = winwsFailureReason(output) || this.proc.currentReason || 'процесс завершился'
-      this.log(`не запустился: ${this.reason}`)
-      return { ok: false, reason: this.reason }
+      this.reason = started.reason
+      this.log(`не запустился: ${started.reason}`)
+      if (attempt >= START_ATTEMPTS || !BUSY_FILTER.test(started.reason)) {
+        return { ok: false, reason: started.reason }
+      }
+      this.log(`фильтр WinDivert ещё занят — попытка ${attempt} из ${START_ATTEMPTS}, повторяю`)
+      await this.killForeign()
+      await sleep(WINDIVERT_SETTLE_MS)
     }
-    this.reason = ''
-    return { ok: true, reason: '' }
   }
 
   async stop(): Promise<{ ok: boolean; reason: string }> {

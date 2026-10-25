@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Check, ChevronRight, Loader2, Play, RotateCcw, ScrollText, X } from 'lucide-react'
-import type { AppConfig, DiagnosticsTargetResult } from '@shared/contract'
+import { AlertTriangle, Check, ChevronRight, Info, Loader2, Play, RotateCcw, ScrollText, Stethoscope, Wrench, X } from 'lucide-react'
+import type { AppConfig, DiagnosticsTargetResult, SysCheck } from '@shared/contract'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -204,6 +204,8 @@ export function DiagnosticsPage({
           </CardContent>
         </Card>
       ) : null}
+
+      <SystemCard t={t} />
 
       {/* Цели проверки */}
       <Card>
@@ -618,6 +620,146 @@ function Mark({
   return (
     <span title={t('diag.no_access')} className="inline-flex text-destructive">
       <X className="h-4 w-4" strokeWidth={2.5} />
+    </span>
+  )
+}
+
+/**
+ * Диагностика системы: проверки из `service.bat` пакета zapret.
+ *
+ * Зачем отдельным блоком. Прежняя диагностика умела только «отвечают ли сайты»,
+ * а причина чаще всего не в стратегии: включён системный прокси, стоит Adguard,
+ * в системе осталась служба WinDivert от чужой копии winws, пакет распакован в
+ * папку с кириллицей. Человек этого не видит и идёт перезагружать компьютер.
+ *
+ * Там, где причина чинится кнопкой, кнопка тут же и есть: удалить службу
+ * WinDivert, снять чужой обход, включить TCP-метки, почистить кэш Discord.
+ */
+function SystemCard({ t }: { t: (key: string, params?: Record<string, string | number>) => string }) {
+  const [busy, setBusy] = useState(false)
+  const [checks, setChecks] = useState<SysCheck[] | null>(null)
+  const [fixing, setFixing] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    try {
+      setChecks(await window.hub.sysdiag.run())
+    } catch {
+      setChecks([])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const fix = async (id: NonNullable<SysCheck['fix']>) => {
+    setFixing(id)
+    try {
+      const result = await window.hub.sysdiag.fix(id)
+      toast({
+        title: result.ok
+          ? t('sys.fixed', { message: result.message })
+          : t('sys.fix_failed', { message: result.message }),
+        variant: result.ok ? 'success' : 'destructive'
+      })
+      // После починки проверяем заново: человек должен видеть, что строка
+      // позеленела, а не верить нам на слово.
+      setChecks(await window.hub.sysdiag.run())
+    } finally {
+      setFixing(null)
+    }
+  }
+
+  const problems = (checks ?? []).filter((check) => check.status === 'fail' || check.status === 'warn')
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">{t('sys.title')}</CardTitle>
+        <CardDescription className="text-xs">{t('sys.hint')}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={() => void run()} disabled={busy}>
+            {busy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Stethoscope className="h-3.5 w-3.5" />
+            )}
+            {busy ? t('sys.checking') : checks ? t('sys.again') : t('sys.run')}
+          </Button>
+          {checks ? (
+            <span className="text-xs text-muted-foreground">
+              {problems.length === 0 ? t('sys.nothing') : t('sys.problems', { count: problems.length })}
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground">{t('sys.empty')}</span>
+          )}
+        </div>
+
+        {checks && checks.length > 0 ? (
+          <div className="divide-y rounded-md border">
+            {checks.map((check) => (
+              <div key={check.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                <CheckIcon status={check.status} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm">{t(`sys.${check.id}`)}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {check.status === 'ok' || check.status === 'info'
+                      ? t(`sys.${check.id}.hint`)
+                      : check.detail || t(`sys.${check.id}.hint`)}
+                  </p>
+                </div>
+                {check.fix ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    disabled={fixing !== null}
+                    onClick={() => void fix(check.fix as NonNullable<SysCheck['fix']>)}
+                  >
+                    {fixing === check.fix ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Wrench className="h-3.5 w-3.5" />
+                    )}
+                    {fixing === check.fix ? t('sys.fixing') : t('sys.fix')}
+                  </Button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Значок проверки: зелёная галочка, жёлтый восклицательный, красный крест. */
+function CheckIcon({ status }: { status: SysCheck['status'] }) {
+  if (status === 'ok') {
+    return (
+      <span className="inline-flex text-success">
+        <Check className="h-4 w-4" strokeWidth={2.5} />
+      </span>
+    )
+  }
+  if (status === 'warn') {
+    return (
+      <span className="inline-flex text-warning">
+        <AlertTriangle className="h-4 w-4" strokeWidth={2.5} />
+      </span>
+    )
+  }
+  if (status === 'fail') {
+    return (
+      <span className="inline-flex text-destructive">
+        <X className="h-4 w-4" strokeWidth={2.5} />
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex text-muted-foreground">
+      <Info className="h-4 w-4" strokeWidth={2.5} />
     </span>
   )
 }

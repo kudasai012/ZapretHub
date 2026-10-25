@@ -22,9 +22,17 @@ import { ZapretComponent } from './zapret'
 import { TgWsComponent } from './tgws'
 import { STATUS_STOPPED } from './procman'
 import { checkAll, checkTarget, parseTarget, parseTargets, probeAll, targets } from './diagnostics'
+import {
+  fixConflicts,
+  fixDiscordCache,
+  fixWinDivert,
+  fixZapretService,
+  runSystemChecks,
+  type SysFix
+} from './sysdiag'
 import { pickWinner } from '@shared/scoring'
 import { checkApp, checkComponents, applyAppUpdate, applyComponentUpdate } from './updater'
-import { setAutostart } from './win32'
+import { enableTcpTimestamps, setAutostart } from './win32'
 
 export interface Services {
   zapret: ZapretComponent
@@ -399,6 +407,32 @@ export function registerIpc(): void {
    * заставлять человека искать её в настройках.
    */
   ipcMain.handle('updates:announce', (_event, force: boolean) => announceUpdates(force))
+  ipcMain.handle('sysdiag:run', async () => {
+    try {
+      return await runSystemChecks()
+    } catch (error) {
+      logger.write(`[ipc] диагностика системы не удалась: ${String(error)}`)
+      return []
+    }
+  })
+
+  ipcMain.handle('sysdiag:fix', async (_event, id: SysFix) => {
+    const fixes: Record<SysFix, () => Promise<{ ok: boolean; message: string }>> = {
+      windivert: fixWinDivert,
+      conflicts: fixConflicts,
+      'zapret-service': fixZapretService,
+      timestamps: async () => ({ ok: await enableTcpTimestamps(), message: 'TCP-метки времени включены' }),
+      discord: fixDiscordCache
+    }
+    const fix = fixes[id]
+    if (!fix) return { ok: false, message: `неизвестная починка: ${id}` }
+    try {
+      return await fix()
+    } catch (error) {
+      return { ok: false, message: String(error) }
+    }
+  })
+
   ipcMain.handle('updates:check', async (_event, force: boolean) => {
     try {
       const found = await checkComponents(services.zapret, services.tgws, force)

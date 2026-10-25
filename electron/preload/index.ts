@@ -56,6 +56,7 @@ const GROUPS: Record<string, readonly string[]> = {
   tgws: ['snapshot', 'saveSettings'],
   process: ['start', 'stop', 'startAll', 'stopAll'],
   diagnostics: ['targets', 'saveTargets', 'checkOne', 'testStrategy', 'checkAll', 'probeAll', 'status', 'runQueue', 'stop'],
+  sysdiag: ['run', 'fix'],
   updates: ['check', 'apply'],
   'app-update': ['check'],
   shell: ['openPath', 'openUrl'],

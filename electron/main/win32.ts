@@ -12,8 +12,13 @@ import os from 'node:os'
 import path from 'node:path'
 export const IS_WINDOWS = process.platform === 'win32'
 
-/** Выполняет команду, не показывая окно консоли. */
-function run(
+/**
+ * Выполняет команду, не показывая окно консоли.
+ *
+ * Наружу — для модулей вроде sysdiag, которым нужны свои вызовы sc и netsh.
+ * Здесь они и остаются: единственное место, где программа общается с системой.
+ */
+export function run(
   file: string,
   args: string[],
   timeout = 15000
@@ -308,25 +313,111 @@ export async function httpCheck(url: string, timeoutMs = 6000): Promise<HttpResu
   )
   const status = Number(result.stdout.trim().split(/\s+/).pop())
   const code = result.code === 0 ? 0 : result.code
-
-  if (code !== 0) {
-    return { ok: false, status: Number.isFinite(status) && status > 0 ? status : 0, code, error: curlError(code) }
+  const verdict = httpVerdict(code, status)
+  return {
+    ok: verdict.ok,
+    status: Number.isFinite(status) && status > 0 ? status : 0,
+    code,
+    error: verdict.error
   }
-  if (!Number.isFinite(status) || status === 0) {
-    return { ok: false, status: 0, code: 0, error: 'ответа нет' }
-  }
-  if (status >= 400) {
-    return { ok: false, status, code: 0, error: `HTTP ${status}` }
-  }
-  return { ok: true, status, code: 0, error: '' }
 }
 
-/** Запускает дочерний процесс, не создавая окна консоли. */
+/**
+ * Открылся ли сайт по итогу запроса.
+ *
+ * Любой код ответа — сайт открылся. Даже 404: он значит, что рукопожатие TLS
+  // и сам запрос прошли, провайдер в канал не влез, а «не тем ответил» — уже
+  // забота сервера. Ровно так считает и проверка самого пакета (utils/test
+  // zapret.ps1): там «HTTP:OK» — это успешный запуск curl, а не код 200.
+  //
+  // Прежняя правила «статус >= 400 — сайт закрыт» объявляла битыми живые
+  // страницы: корни cdn.discordapp.com, i.ytimg.com, redirector.googlevideo.com
+  // и www.gstatic.com отдают 403/404 всегда, и стратегия получала 65 % там, где
+  // проверка пакета показывала 100 % и все OK. Отсюда и расхождение, и «нерабочие»
+  // стратегии, которые на самом деле работали.
+  //
+  // Отдельной функцией — чтобы правило можно было проверить тестом: curl.exe в
+  // песочнице нет, а поведение «404 значит ок» проверять обязательно.
+ */
+export function httpVerdict(exitCode: number, status: number): { ok: boolean; error: string } {
+  // curl не дотянулся: таймаут (28), обрыв на сертификате (35), сброс (54).
+  if (exitCode !== 0) return { ok: false, error: curlError(exitCode) }
+  if (!Number.isFinite(status) || status <= 0) return { ok: false, error: 'ответа нет' }
+  return { ok: true, error: '' }
+}
+
+/**
+ * PID всех процессов, у которых в пути к exe есть эта подстрока.
+ *
+ * Зачем: TgWsProxy в портативном режиме распаковывает копию себя, и процесс,
+ * который остаётся висеть в трее, называется не так, как файл, который мы
+ * запустили. Гасить по имени запущенного файла бесполезно — надо по пути.
+ */
+export async function pidsByPathNeedle(needle: string): Promise<number[]> {
+  if (!IS_WINDOWS || !needle) return []
+  const escaped = needle.replace(/'/g, "''")
+  const result = await powershell(
+    `Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*${escaped}*' } | Select-Object -ExpandProperty Id`
+  )
+  return readPids(result.stdout)
+}
+
+/** PID всех процессов, которые слушают порт. */
+export async function pidsByPort(port: number): Promise<number[]> {
+  if (!IS_WINDOWS || !Number.isFinite(port) || port <= 0) return []
+  const result = await run('netstat', ['-ano'], 20000)
+  return parseNetstatPids(result.stdout, port)
+}
+
+/** Достаёт числа из вывода команды, по одному PID на строку. */
+export function readPids(text: string): number[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => Number(line.trim()))
+    .filter((pid) => Number.isFinite(pid) && pid > 0)
+}
+
+/**
+ * Разбирает вывод `netstat -ano` и отдаёт PID, слушающие порт.
+ *
+ * Строка выглядит так:
+ *   TCP    127.0.0.1:1443    0.0.0.0:0    LISTENING    4812
+ * Смотрим только LISTENING: иначе порт на той стороне чужого соединения тоже
+ * попал бы в ответ, и программа гасила бы не те процессы.
+ *
+ * Отдельной функцией — чтобы правило разбора проверялось тестом: netstat в
+ * песочнице нет, а ошибка здесь значит «гасим не тех».
+ */
+export function parseNetstatPids(text: string, port: number): number[] {
+  const pids = new Set<number>()
+  const marker = `:${port}`
+  const NL = String.fromCharCode(10)
+  for (const line of text.split(NL)) {
+    // Столбцы netstat: протокол, локальный адрес, внешний адрес, состояние, PID.
+    const columns = line.trim().split(/ +/).filter(Boolean)
+    if (columns.length < 5) continue
+    if (!/LISTENING/i.test(columns[3])) continue
+    // Слушаем мы свой локальный адрес: порт на той стороне чужого соединения
+    // не считаем — иначе программа гасила бы не те процессы.
+    if (!columns[1].endsWith(marker)) continue
+    const pid = Number(columns[columns.length - 1])
+    if (Number.isFinite(pid) && pid > 0) pids.add(pid)
+  }
+  return [...pids]
+}
+
+/**
+ * Запускает процесс «отвязанным»: переживёт закрытие программы, если она
+ * перестанет за ним следить.
+ *
+ * Нужен для компонентов: winws.exe и TgWsProxy должны продолжать работать,
+ * пока программа перезапускается.
+ */
 export function spawnDetached(
   command: string,
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
-) {
+): ChildProcess {
   return spawn(command, args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
@@ -336,35 +427,26 @@ export function spawnDetached(
   })
 }
 
-// ---------------------------------------------------------------- дозорный
-
-/** Строковый список для PowerShell: @('a','b'). */
+/** Список строк в виде PowerShell-массива: @('a','b'). */
 function psList(items: string[]): string {
   return `@(${items.map((item) => `'${item.replace(/'/g, "''")}'`).join(',')})`
 }
 
 /**
- * Текст дозорного — крошечного процесса, который дожидается смерти программы
- * и гасит всё, что она за собой оставила.
+ * Сценарий дозорного на PowerShell.
  *
- * Зачем: Windows не убивает дочерние процессы вслед за родителем. Компоненты
- * запущены отдельно (detached), поэтому «снять задачу Zapret Hub» в диспетчере
- * задач, падение программы или обрыв питания оставляли winws.exe и
- * TgWsProxy_windows.exe работать уже без хозяина: обход оставался включённым
- * без всякого управления, а файлы компонентов держались занятыми — из-за чего
- * программа потом не обновлялась и не удалялась.
- *
- * Дозорный живёт, пока живы и программа, и её компоненты. Программа исчезла —
- * он гасит компоненты (сначала по номерам, вместе с деревом, потом по имени
- * образа — вдруг компонент успел породить копию себя) и уходит сам. Компоненты
- * исчезли раньше — уходит, не дожидаясь программы: иначе дозорные копились бы
- * при каждом останове обхода.
- *
- * Пишем на PowerShell: это есть в любой Windows 10+, и не нужен ни нативный
- * модуль (он ломает сборку), ни объект «задание», который в Node не достать.
+ * Следит за двумя вещами: пока программа жива и пока живы её компоненты. Как
+ * только программа исчезла — гасит компоненты по номерам, вместе с деревом, а
+ * потом и по имени образа: TgWsProxy распаковывает копию себя, и по номеру её
+ * не достать.
  */
-export function guardianScript(hubPid: number, victims: number[], images: string[]): string {
-  // Тело цикла: ждём, пока живы и программа, и компоненты.
+export function guardianScript(
+  hubPid: number,
+  victims: number[],
+  images: string[],
+  needles: string[] = [],
+  ports: number[] = []
+): string {
   const loop = [
     // программа исчезла — гасим
     'if(-not (Get-Process -Id $hub -ErrorAction SilentlyContinue)){break}',
@@ -375,31 +457,36 @@ export function guardianScript(hubPid: number, victims: number[], images: string
     'Start-Sleep -Milliseconds 800'
   ].join(';')
 
-  // PowerShell разделяет команды точкой с запятой, а не переводом строки:
-  // строка уезжает одной командой, и слипшиеся команды он не поймёт.
   const statements = [
     `$hub=${hubPid}`,
     `$victims=${psList(victims.map(String))}`,
     `$images=${psList(images)}`,
+    `$needles=${psList(needles)}`,
+    `$ports=${psList(ports.map(String))}`,
     `while(1){${loop}}`,
     // гасим по номерам, вместе с деревом: это ровно те процессы, что запустила программа
     'foreach($pid in $victims){taskkill /PID $pid /T /F | Out-Null}',
     // и добиваем по имени образа: TgWsProxy распаковывает копию себя
     'foreach($image in $images){taskkill /IM "$image.exe" /T /F | Out-Null}',
+    // копия называется иначе, зато путь к ней прежний — гасим по пути
+    'foreach($needle in $needles){Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*$needle*" } | ForEach-Object { taskkill /PID $_.Id /T /F | Out-Null }}',
+    // и последний довод: прокси всегда слушает свой порт, другого там нет
+    'foreach($port in $ports){Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { taskkill /PID $_.OwningProcess /T /F | Out-Null }}',
     'exit'
   ]
   return statements.join(';')
 }
 
 /**
- * Запускает дозорного. Возвращает его процесс, чтобы программа могла снять
- * дозорного сама — например, при собственном перезапуске, когда гасить обходы
- * как раз не надо.
+ * Поднимает дозорного: отдельный PowerShell, который гасит компоненты, если
+ * программу убьют вслепую (диспетчером задач или `taskkill /F`).
  */
 export function spawnGuardian(
   hubPid: number,
   victims: number[],
-  images: string[] = []
+  images: string[] = [],
+  needles: string[] = [],
+  ports: number[] = []
 ): ChildProcess | null {
   if (!IS_WINDOWS) return null
   const alive = victims.filter((pid) => Number.isFinite(pid) && pid > 0)
@@ -407,19 +494,10 @@ export function spawnGuardian(
   try {
     return spawn(
       'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        guardianScript(hubPid, alive, images)
-      ],
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', guardianScript(hubPid, alive, images, needles.filter(Boolean), ports.filter((port) => port > 0))],
       { windowsHide: true, detached: true, stdio: 'ignore' }
     )
   } catch {
-    // не смогли поставить дозорного — работаем дальше: это страховка, а не
-    // обязательное условие запуска обхода
     return null
   }
 }

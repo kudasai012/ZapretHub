@@ -29,7 +29,10 @@ import {
   killForeignProcesses,
   killTree,
   pidsByName,
+  pidsByPathNeedle,
+  pidsByPort,
   powershell,
+  run,
   spawnDetached,
   spawnGuardian
 } from './win32'
@@ -53,6 +56,21 @@ export interface ManagedOptions {
   onExit?: (code: number | null) => void
   restartOnCrash?: boolean
   restartDelayMs?: number
+  /**
+   * Подстрока в пути к exe, по которой ищем процесс.
+   *
+   * Нужно там, где компонент распаковывает копию себя: имя файла, который мы
+   * запустили, перестаёт совпадать с именем процесса, который остаётся висеть.
+   * Гасить по имени запущенного файла в этом случае бесполезно.
+   */
+  killNeedle?: string
+  /**
+   * Порт, который слушает компонент.
+   *
+   * Последний довод: порт всегда один, и второй программы на нём не бывает.
+   */
+  killPort?: number
+
 }
 
 export class ManagedProcess {
@@ -167,7 +185,13 @@ export class ManagedProcess {
     if (!pid) return
     if (!configStore.get().general.stopComponentsOnQuit) return
     const image = this.imageName()
-    this.guardian = spawnGuardian(process.pid, [pid], image ? [image] : [])
+    this.guardian = spawnGuardian(
+      process.pid,
+      [pid],
+      image ? [image] : [],
+      this.options.killNeedle ? [this.options.killNeedle] : [],
+      this.options.killPort ? [this.options.killPort] : []
+    )
   }
 
   /** Снимает дозорного: компонент остаётся работать уже без программы. */
@@ -259,17 +283,26 @@ export class ManagedProcess {
 
     await sampled
 
-    // Распакованная копия остаётся висеть по имени образа — подчищаем её.
+    // Распакованная копия остаётся висеть — подчищаем её тремя способами:
+    // по имени образа, по подстроке в пути и по порту. Одного имени мало:
+    // TgWsProxy запускается одним файлом, а остаётся висеть другим.
     const image = this.imageName()
-    if (image) {
-      const deadline = Date.now() + SWEEP_TIMEOUT_MS
-      while (Date.now() < deadline) {
-        const alive = await pidsByName(image)
-        const foreign = alive.filter((p) => !this.ownPids().has(p))
-        if (foreign.length === 0) break
-        await killForeignProcesses(image, this.ownPids())
-        await new Promise((r) => setTimeout(r, 400))
+    const needle = this.options.killNeedle
+    const port = this.options.killPort
+    const deadline = Date.now() + SWEEP_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const [byImage, byPath, byPort] = await Promise.all([
+        image ? pidsByName(image) : Promise.resolve([]),
+        needle ? pidsByPathNeedle(needle) : Promise.resolve([]),
+        port ? pidsByPort(port) : Promise.resolve([])
+      ])
+      const foreign = [...byImage, ...byPath, ...byPort].filter((p) => !this.ownPids().has(p))
+      if (foreign.length === 0) break
+      await killForeignProcesses(image || '', this.ownPids())
+      for (const pid of foreign) {
+        await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
       }
+      await new Promise((r) => setTimeout(r, 400))
     }
 
     // Дозорный снимаем в самом конце: пока он жив, он не даст компоненту
