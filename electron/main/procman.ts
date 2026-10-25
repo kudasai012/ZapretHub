@@ -20,10 +20,18 @@
  * всякого управления, да и файлы компонентов будут заняты. Поэтому рядом с
  * компонентом живёт «дозорный»: крошечный процесс, который гасит компонент,
  * как только исчезла программа.
+ *
+ * Дозорный держит не только присмотр, но и задание Windows (job object) с
+ * компонентом внутри. Это важнее присмотра: задание переживает выход
+ * родителя, поэтому осиротевшая распакованная копия TgWsProxy из него не
+ * уходит, а когда дескриптор задания закрывается, система гасит всех его
+ * участников сама. Дозорный — дитя программы, снятая задача убирает и его, и
+ * тогда гасит уже ядро, а не наш код: нашему коду при такой смерти программы
+ * выполниться некогда.
  */
 import { ChildProcess } from 'node:child_process'
 import type { ProcessStatus } from '@shared/contract'
-import { LOGS_DIR } from './paths'
+import { CONFIG_FILE, LOGS_DIR } from './paths'
 import { configStore } from './config'
 import {
   killForeignProcesses,
@@ -34,7 +42,9 @@ import {
   powershell,
   run,
   spawnDetached,
-  spawnGuardian
+  clearReleaseFlag,
+  spawnGuardian,
+  writeReleaseFlag
 } from './win32'
 
 export const STATUS_STOPPED: ProcessStatus = 'stopped'
@@ -81,6 +91,14 @@ export class ManagedProcess {
   private restartTimer: NodeJS.Timeout | null = null
   private guardian: ChildProcess | null = null
   private stopping = false
+  /**
+   * Номер, с которого компонент запускали. Не стирается, когда процесс уходит
+   * сам: у TgWsProxy в портативном режиме запущенный нами файл уходит через
+   * секунду, оставив работать распакованную копию. Если помнить только
+   * текущий процесс, остановка после такого ухода решит «гасить нечего» и не
+   * сделает ничего — а копия продолжит висеть в трее.
+   */
+  private lastPid = 0
   private readonly options: ManagedOptions
 
   constructor(options: ManagedOptions) {
@@ -134,6 +152,7 @@ export class ManagedProcess {
     }
 
     this.proc = child
+    this.lastPid = child.pid ?? 0
     this.tree = new Set(child.pid ? [child.pid] : [])
     this.startGuardian()
 
@@ -183,19 +202,51 @@ export class ManagedProcess {
   private startGuardian(): void {
     const pid = this.proc?.pid
     if (!pid) return
-    if (!configStore.get().general.stopComponentsOnQuit) return
     const image = this.imageName()
-    this.guardian = spawnGuardian(
-      process.pid,
-      [pid],
-      image ? [image] : [],
-      this.options.killNeedle ? [this.options.killNeedle] : [],
-      this.options.killPort ? [this.options.killPort] : []
+    // Чужую метку «отпущен» стираем: дозорный, который найдёт её при смерти
+    // программы, откажется гасить компонент.
+    clearReleaseFlag(this.options.key)
+    this.guardian = spawnGuardian({
+      key: this.options.key,
+      hubPid: process.pid,
+      victims: [pid],
+      images: image ? [image] : [],
+      needles: this.options.killNeedle ? [this.options.killNeedle] : [],
+      ports: this.options.killPort ? [this.options.killPort] : [],
+      killOnExit: configStore.get().general.stopComponentsOnQuit,
+      logPath: componentLogPath('guardian.log'),
+      configPath: CONFIG_FILE
+    })
+    this.emit(
+      this.guardian
+        ? '[hub] дозорный поднят: компонент принят в задание Windows'
+        : '[hub] дозорного поднять не удалось'
     )
   }
 
-  /** Снимает дозорного: компонент остаётся работать уже без программы. */
+  /**
+   * Отпускает компонент: он остаётся работать уже без программы.
+   *
+   * Дозорного не гасим — гашение закрыло бы задание и прибрало бы вместе с ним
+   * сам компонент. Кладём метку: дозорный прочитает её, когда программа
+   * исчезнет, снимет с задания гасящую метку и выйдет, оставив компонент
+   * работать. Так же ведёт себя перезапуск программы.
+   */
   releaseGuardian(): void {
+    const guardian = this.guardian
+    this.guardian = null
+    if (!guardian) return
+    writeReleaseFlag(this.options.key)
+  }
+
+  /**
+   * Снимает дозорного, а вместе с ним — задание Windows.
+   *
+   * Закрытие задания гасит всех его участников силами системы, поэтому это
+   * последний и самый надёжный шаг остановки: он прибирает даже распакованную
+   * копию, которая осиротела и вышла из нашего дерева процессов.
+   */
+  private killGuardian(): void {
     const guardian = this.guardian
     this.guardian = null
     if (!guardian) return
@@ -261,7 +312,7 @@ export class ManagedProcess {
       clearTimeout(this.restartTimer)
       this.restartTimer = null
     }
-    const pid = this.proc?.pid
+    const pid = this.proc?.pid ?? this.lastPid
     if (!pid) {
       this.setStatus(STATUS_STOPPED)
       return
@@ -305,11 +356,13 @@ export class ManagedProcess {
       await new Promise((r) => setTimeout(r, 400))
     }
 
-    // Дозорный снимаем в самом конце: пока он жив, он не даст компоненту
-    // остаться на диске в одиночестве, даже если что-то в остановке сорвётся.
-    this.releaseGuardian()
+    // Дозорного снимаем в самом конце: вместе с ним закрывается задание
+    // Windows, и система прибирает всех его участников — даже осиротевшую
+    // распакованную копию, до которой taskkill не дотянулся.
+    this.killGuardian()
 
     this.proc = null
+    this.lastPid = 0
     this.setStatus(STATUS_STOPPED)
   }
 

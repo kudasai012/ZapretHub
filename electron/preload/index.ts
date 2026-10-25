@@ -58,7 +58,10 @@ const GROUPS: Record<string, readonly string[]> = {
   diagnostics: ['targets', 'saveTargets', 'checkOne', 'testStrategy', 'checkAll', 'probeAll', 'status', 'runQueue', 'stop'],
   sysdiag: ['run', 'fix'],
   updates: ['check', 'apply'],
-  'app-update': ['check'],
+  // 'apply' здесь обязателен: без него кнопка «Обновить сейчас» в окне релиза
+  // зовёт undefined и молча ничего не делает — контракт метод объявляет, а мост
+  // его не отдаёт.
+  'app-update': ['check', 'apply'],
   shell: ['openPath', 'openUrl'],
   window: ['minimize', 'close', 'isMaximized', 'toggleMaximize'],
   app: ['version', 'restart']

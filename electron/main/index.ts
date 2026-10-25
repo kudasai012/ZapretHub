@@ -8,13 +8,21 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
+import { isUiClose, resetUiClose } from './close-intent'
 import { configStore, tmpDir } from './config'
 import { ensureDirs, BASE_DIR, APP_DIR_NAME, DATA_ROOT } from './paths'
 import { logger } from './logger'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent } from './tgws'
 import { announceUpdates, attachServices, broadcastAll, emit, registerIpc } from './ipc'
-import { isAdmin, relaunchElevated, setAutostart } from './win32'
+import {
+  isAdmin,
+  LOGIN_ARG,
+  relaunchElevated,
+  setAutostart,
+  startedAtLogin,
+  warmUpJobHelper
+} from './win32'
 
 // Один экземпляр на машину: две копии Hub дрались бы за один и тот же
 // фильтр WinDivert, и вторая просто не запустилась бы.
@@ -72,26 +80,52 @@ function createWindow(): void {
     // Тот же смысл у ключа --tray: его пишет в реестр автозапуск (см.
     // setAutostart), и раньше программа его не замечала — при входе в Windows
     // окно открывалось само, хотя автозапуску велено подняться в трей.
-    if (config.general.startMinimized || process.argv.includes('--tray')) return
+    if (config.general.startMinimized) {
+      logger.write('[hub] окно не показываем: включено «запускать свёрнутым»')
+      return
+    }
+    if (startedAtLogin()) {
+      // Сюда попадаем только при входе в Windows: автозапуск поднимает
+      // программу в трей, и окно на экране появляться не должно.
+      logger.write(`[hub] вход в Windows (${LOGIN_ARG}): окно не показываем`)
+      return
+    }
     mainWindow.show()
   })
 
-  // Крестик. Если «свернуть в трей» включено — окно прячется, программа
-  // остаётся работать (обходы при этом продолжают работать по своей
-  // настройке). Если выключено — крестик закрывает программу совсем: раньше
-  // окно исчезало, а программа оставалась висеть в трее, и выбраться оттуда
-  // можно было только через меню трея.
+  /**
+   * Крестик и всё остальное.
+   *
+   * Крестик нарисован в интерфейсе, поэтому его видно: он приходит вызовом
+   * оттуда. Если «свернуть в трей» включено — окно прячется, программа
+   * остаётся работать; если выключено — крестик закрывает программу совсем
+   * (раньше окно исчезало, а программа оставалась висеть в трее, и выбраться
+   * оттуда можно было только через меню трея).
+   *
+   * Всё остальное — «Завершить задачу» в панели задач, «Закрыть все окна»,
+   * выход из Windows — приходит как просьба закрыться от системы, мимо
+   * интерфейса. Здесь прятаться в трей нельзя ни в коем случае: Windows
+   * считает задачу исполненной, как только окна не стало, и принудительно
+   * гасить нас не станет. Программа останется жить в трее, а вместе с ней и
+   * компоненты — сколько их потом ни добивай. Поэтому на чужую просьбу
+   * закрываемся по-настоящему.
+   */
   mainWindow.on('close', (event) => {
     if (quitting) return
-    if (config.general.minimizeToTray) {
+    const settings = configStore.get().general
+    if (isUiClose() && settings.minimizeToTray) {
+      resetUiClose()
       event.preventDefault()
       mainWindow?.hide()
       return
     }
+    resetUiClose()
     event.preventDefault()
     quitting = true
     void (async () => {
-      await stopAllSafely()
+      // Настройку «останавливать обходы при выходе» уважаем и здесь: кто
+      // просил оставить обход работать без программы, тот его и получит.
+      if (settings.stopComponentsOnQuit) await stopAllSafely()
       app.quit()
     })()
   })
@@ -299,6 +333,11 @@ function watchComponents(): void {
 async function bootstrap(): Promise<void> {
   ensureDirs()
   configStore.load()
+
+  // Сборку для заданий Windows компилируем сразу: она нужна дозорному в первые
+  // же секунды после запуска компонента, а компиляция занимает секунду-две.
+  // За это время распакованная копия TgWsProxy успела бы пожить без задания.
+  warmUpJobHelper()
 
   zapret = new ZapretComponent()
   tgws = new TgWsComponent()

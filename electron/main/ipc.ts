@@ -15,6 +15,7 @@ import type {
   MainEvents,
   UpdateInfo
 } from '@shared/contract'
+import { markUiClose } from './close-intent'
 import { configStore, DEFAULT_DIAG_TARGETS } from './config'
 import { logger } from './logger'
 import { openInFileManager } from './paths'
@@ -507,6 +508,10 @@ export function registerIpc(): void {
   ipcMain.handle('window:close', (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) return
+    // Крестик нарисован в интерфейсе, и это единственный случай, когда
+    // закрытие идет от человека, а не от системы. Помечаем, чтобы обработчик
+    // закрытия окна не спутал его с «Завершить задачу».
+    markUiClose()
     window.close()
   })
   ipcMain.handle('window:isMaximized', (event) => {

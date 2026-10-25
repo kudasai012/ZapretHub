@@ -393,7 +393,13 @@ export async function applyAppUpdate(): Promise<{ ok: boolean; message: string }
       say(percent, stage, message)
     )
     const { spawn } = require('node:child_process') as typeof import('node:child_process')
-    spawn(target, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'], {
+    // Ключ тишины — «/S». Установщик собирает NSIS, а не Inno Setup, и ключи
+    // Inno (/VERYSILENT, /SUPPRESSMSGBOXES, /NORESTART) он не понимает: раньше
+    // здесь стояли они, и вместо тихой установки человеку открывался мастер
+    // установки с кнопками «Далее», хотя программа обещает «закроется и
+    // запустит его». NSIS неизвестные ключи просто игнорирует, поэтому
+    // молчание выглядело работающим, а на деле было нет.
+    spawn(target, ['/S'], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true

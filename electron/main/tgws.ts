@@ -12,7 +12,7 @@ import { TGWS_DIR, resolveTgwsDir, resolveTgwsExe } from './paths'
 import { configStore } from './config'
 import { logger } from './logger'
 import { ManagedProcess, STATUS_STOPPED } from './procman'
-import { isAdmin } from './win32'
+import { isAdmin, pidsByName, pidsByPathNeedle, run } from './win32'
 
 export const EXE_NAME = 'TgWsProxy_windows.exe'
 const PORTABLE_DIR = 'TgWsProxy_data'
@@ -144,6 +144,32 @@ export class TgWsComponent {
     return 'TG WS Proxy'
   }
 
+  /**
+   * Убирает чужой экземпляр себя же — перед запуском.
+   *
+   * Если прошлая копия осталась висеть (снятая задача в диспетчере, сбой),
+   * порт занят, и новый прокси не сможет его занять: программа покажет
+   * «работает», а Telegram уйдёт в молчащий порт старого процесса. Поэтому
+   * перед запуском смотрим, не висит ли кто-то с нашим именем или с нашей
+   * подстрокой в пути, и гасим.
+   *
+   * Тремя способами — по той же причине, по которой их использует остановка:
+   * в портативном режиме запущенный нами файл уходит через секунду, оставив
+   * распакованную копию с другим именем.
+   */
+  private async clearStaleCopy(): Promise<void> {
+    const found = await Promise.all([
+      pidsByName('TgWsProxy_windows'),
+      pidsByName('TgWsProxy'),
+      pidsByPathNeedle('TgWsProxy')
+    ])
+    const pids = [...new Set(found.flat())].filter((pid) => pid > 0 && pid !== process.pid)
+    for (const pid of pids) {
+      logger.write(`[tgws] убираю оставшийся процесс ${pid} перед запуском`)
+      await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
+    }
+  }
+
   async start(): Promise<{ ok: boolean; reason: string }> {
     if (this.isRunning()) return { ok: true, reason: '' }
     this.reason = ''
@@ -162,6 +188,8 @@ export class TgWsComponent {
       this.reason = error instanceof Error ? error.message : String(error)
       return { ok: false, reason: this.reason }
     }
+
+    await this.clearStaleCopy()
 
     this.proc = new ManagedProcess({
       key: 'tgws',
