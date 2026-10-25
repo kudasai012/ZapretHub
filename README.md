@@ -77,7 +77,11 @@ Discord / YouTube ─► winws.exe (WinDivert, стратегия из .bat) ─
 
 ### Готовый установщик
 
+<<<<<<< HEAD
 Скачай **`ZapretHub-Setup-1.0.3.exe`** из
+=======
+Скачай **`ZapretHub-Setup-1.0.2.exe`** из
+>>>>>>> be0a9b3452662c715014a27b9457f80c49e1e2a6
 [Releases](https://github.com/kudasai012/ZapretHub/releases) и запусти.
 
 - ставится в `C:\Program Files\Zapret Hub` (папку можно поменять);
