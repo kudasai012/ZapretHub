@@ -19,14 +19,25 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import { IS_WINDOWS, pidsByName, powershell, queryService, removeService, run } from './win32'
+import {
+  IS_WINDOWS,
+  pidsByName,
+  powershell,
+  queryService,
+  removeService,
+  run,
+  tcpTimestampsOpt,
+  timestampsOn
+} from './win32'
+import type { BrowserDoh } from './browsers'
+import { scanBrowsers } from './browsers'
 import { DATA_ROOT, resolveZapretBinDir } from './paths'
 
 /** Итог проверки. */
 export type SysStatus = 'ok' | 'warn' | 'fail' | 'info'
 
 /** Что можно починить кнопкой. */
-export type SysFix = 'windivert' | 'conflicts' | 'zapret-service' | 'timestamps' | 'discord'
+export type SysFix = 'windivert' | 'conflicts' | 'zapret-service' | 'timestamps' | 'discord' | 'doh'
 
 export interface SysCheck {
   /** Устойчивое имя: по нему интерфейс берёт подпись из своего словаря. */
@@ -47,7 +58,8 @@ export interface SysFacts {
   zapretService: string
   proxyEnable: string
   proxyServer: string
-  timestamps: string
+  /** Tcp1323Opts: бит 1 — метки времени. null — значения в реестре нет. */
+  timestampsOpts: number | null
   adguard: boolean
   winwsPids: number[]
   dohCount: number
@@ -55,6 +67,8 @@ export interface SysFacts {
   paths: string[]
   oneDrive: string
   winDivertSys: boolean
+  /** Зашифрованный DNS по браузерам. */
+  browsers: BrowserDoh[]
 }
 
 const EMPTY_FACTS: SysFacts = {
@@ -64,14 +78,15 @@ const EMPTY_FACTS: SysFacts = {
   zapretService: 'NOT_FOUND',
   proxyEnable: '',
   proxyServer: '',
-  timestamps: '',
+  timestampsOpts: null,
   adguard: false,
   winwsPids: [],
   dohCount: 0,
   hosts: '',
   paths: [],
   oneDrive: '',
-  winDivertSys: false
+  winDivertSys: false,
+  browsers: []
 }
 
 /** Службы, которые дерутся с zapret за WinDivert. */
@@ -123,10 +138,15 @@ export function evaluateFacts(facts: SysFacts): SysCheck[] {
   const checks: SysCheck[] = []
 
   // Base Filtering Engine — без него WinDivert не работает вовсе.
+  const bfeKnown = facts.bfe !== 'NOT_FOUND' && facts.bfe !== 'UNKNOWN'
   checks.push(
     facts.bfe === 'RUNNING'
       ? { id: 'bfe', status: 'ok', detail: '' }
-      : { id: 'bfe', status: 'fail', detail: facts.bfe }
+      : bfeKnown
+        ? // служба есть и стоит — обход действительно не запустится
+          { id: 'bfe', status: 'fail', detail: '' }
+        : // состояние прочитать не удалось: человеку говорим понятное, а не «UNKNOWN»
+          { id: 'bfe', status: 'warn', detail: '' }
   )
 
   // Системный прокси: часть стратегий уходит в него и не находит блокировку.
@@ -142,7 +162,7 @@ export function evaluateFacts(facts: SysFacts): SysCheck[] {
 
   // TCP-метки времени: без них часть стратегий не заводится.
   checks.push(
-    /timestamps/i.test(facts.timestamps) && /enabled/i.test(facts.timestamps)
+    timestampsOn(facts.timestampsOpts)
       ? { id: 'timestamps', status: 'ok', detail: '' }
       : { id: 'timestamps', status: 'warn', detail: '', fix: 'timestamps' }
   )
@@ -210,19 +230,34 @@ export function evaluateFacts(facts: SysFacts): SysCheck[] {
       : { id: 'windivert-sys', status: 'fail', detail: '' }
   )
 
-  // VPN: свой обход поверх чужого — источник странностей.
+  // VPN: сведение, а не замечание. Свой обход поверх чужого и правда источник
+  // странностей, но службу человек не выключит — она ему нужна. Поэтому в
+  // «Замечания» строка не попадает, а напоминание остаётся на всякий случай.
   const vpn = servicesMatching(facts.services, ['happservice'])
   checks.push(
     vpn.length > 0
-      ? { id: 'vpn', status: 'warn', detail: vpn.join(', ') }
+      ? { id: 'vpn', status: 'info', detail: vpn.join(', ') }
       : { id: 'vpn', status: 'ok', detail: '' }
   )
 
   // Зашифрованный DNS: без него провайдер видит запросы и режет их раньше.
+  // Системный DoH браузеры не используют, поэтому смотрим и на них: есть
+  // установленный браузер без DoH — предлагаем включить, включён — даём выключить.
+  const dohOn = facts.browsers.filter((item) => item.installed && item.on && item.confirmed)
+  const dohMaybe = facts.browsers.filter((item) => item.installed && item.on && !item.confirmed)
+  const dohReady = facts.browsers.filter((item) => item.installed)
+  const dohDetail = [
+    ...(dohOn.length > 0 ? [dohOn.map((item) => item.name).join(', ')] : []),
+    ...(dohMaybe.length > 0 ? [`${dohMaybe.map((item) => item.name).join(', ')} без подтверждения`] : [])
+  ].join('; ')
   checks.push(
     facts.dohCount > 0
       ? { id: 'doh', status: 'ok', detail: '' }
-      : { id: 'doh', status: 'info', detail: '' }
+      : dohOn.length > 0
+        ? { id: 'doh', status: 'ok', detail: dohDetail, fix: 'doh' }
+        : dohReady.length > 0
+          ? { id: 'doh', status: 'info', detail: dohDetail, fix: 'doh' }
+          : { id: 'doh', status: 'info', detail: '' }
   )
 
   // hosts с записями про YouTube: сайт уходит по IP, и обход его не касается.
@@ -293,7 +328,7 @@ export async function collectFacts(): Promise<SysFacts> {
     queryService('BFE'),
     queryService('WinDivert'),
     queryService('zapret'),
-    run('netsh', ['interface', 'tcp', 'show', 'global'], 15000),
+    tcpTimestampsOpt(),
     pidsByName('AdguardSvc'),
     pidsByName('winws'),
     powershell(dohScript, 25000)
@@ -314,6 +349,7 @@ export async function collectFacts(): Promise<SysFacts> {
   }
 
   const dohCount = Number(doh.stdout.trim().split(/\r?\n/).pop() ?? '0')
+  const browsers = await scanBrowsers()
 
   return {
     services: services.stdout,
@@ -322,14 +358,15 @@ export async function collectFacts(): Promise<SysFacts> {
     zapretService,
     proxyEnable: await regQuery('ProxyEnable', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'),
     proxyServer: await regQuery('ProxyServer', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'),
-    timestamps: timestamps.stdout,
+    timestampsOpts: timestamps,
     adguard: adguardPids.length > 0,
     winwsPids,
     dohCount: Number.isFinite(dohCount) ? dohCount : 0,
     hosts,
     paths: [path.dirname(app.getPath('exe')), DATA_ROOT],
     oneDrive: process.env.OneDrive ?? '',
-    winDivertSys
+    winDivertSys,
+    browsers
   }
 }
 

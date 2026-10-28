@@ -5,10 +5,12 @@
  * знает о Node: он зовёт window.hub.config.save(...) и получает ответ —
  * точно так же, как звал бы обычный HTTP-эндпоинт.
  */
+import { spawn } from 'node:child_process'
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import type {
   AppUpdateInfo,
   ComponentKey,
+  ComponentVersion,
   DiagnosticsTargetResult,
   ErrorNotice,
   HomeState,
@@ -18,7 +20,7 @@ import type {
 import { markUiClose } from './close-intent'
 import { configStore, DEFAULT_DIAG_TARGETS } from './config'
 import { logger } from './logger'
-import { openInFileManager } from './paths'
+import { openInFileManager, uninstallerPath } from './paths'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent } from './tgws'
 import { STATUS_STOPPED } from './procman'
@@ -32,8 +34,16 @@ import {
   type SysFix
 } from './sysdiag'
 import { pickWinner } from '@shared/scoring'
-import { checkApp, checkComponents, applyAppUpdate, applyComponentUpdate } from './updater'
-import { enableTcpTimestamps, setAutostart } from './win32'
+import {
+  checkApp,
+  checkComponents,
+  componentVersions,
+  applyAppUpdate,
+  applyComponentUpdate
+} from './updater'
+import type { BrowserId } from './browsers'
+import { BROWSER_NAMES, DOH_PROVIDERS, applyBrowsersDoh } from './browsers'
+import { enableTcpTimestamps, setAutostart, tcpTimestampsOpt, timestampsOn } from './win32'
 
 export interface Services {
   zapret: ZapretComponent
@@ -55,13 +65,13 @@ export function attachServices(next: Services): void {
  */
 export async function announceUpdates(
   force: boolean
-): Promise<{ checked: UpdateInfo[]; app: AppUpdateInfo | null }> {
+): Promise<{ checked: UpdateInfo[]; versions: ComponentVersion[]; app: AppUpdateInfo | null }> {
   const checked = await checkComponents(services.zapret, services.tgws, force)
   for (const info of checked) emit('update:available', info)
   const app = await checkApp(force)
   if (app) emit('app-update:available', app)
   broadcastAll()
-  return { checked, app }
+  return { checked, versions: componentVersions(services.zapret, services.tgws), app }
 }
 
 /** Рассылает событие во все окна. */
@@ -417,18 +427,56 @@ export function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('sysdiag:fix', async (_event, id: SysFix) => {
-    const fixes: Record<SysFix, () => Promise<{ ok: boolean; message: string }>> = {
+  ipcMain.handle('sysdiag:fix', async (_event, id: SysFix, option?: string) => {
+    const fixes: Record<SysFix, (option?: string) => Promise<{ ok: boolean; message: string }>> = {
       windivert: fixWinDivert,
       conflicts: fixConflicts,
       'zapret-service': fixZapretService,
-      timestamps: async () => ({ ok: await enableTcpTimestamps(), message: 'TCP-метки времени включены' }),
-      discord: fixDiscordCache
+      timestamps: async () => {
+        await enableTcpTimestamps()
+        // перечитываем систему, а не верим вспомогательной функции: именно из-за
+        // веры ей программа раньше рапортовала «починено» там, где ничего не вышло
+        const on = timestampsOn(await tcpTimestampsOpt())
+        return on
+          ? { ok: true, message: 'TCP-метки времени включены' }
+          : { ok: false, message: 'Включить метки времени не удалось' }
+      },
+      discord: fixDiscordCache,
+      // Зашифрованный DNS в браузерах. option — id провайдера или 'off'.
+      doh: async (option?: string) => {
+        if (!option) return { ok: false, message: 'Провайдер не выбран' }
+        const preset = DOH_PROVIDERS.find((item) => item.id === option)
+        if (option !== 'off' && !preset) return { ok: false, message: 'Провайдер не выбран' }
+        const provider = preset ? preset.url : null
+        const applied = await applyBrowsersDoh(provider)
+        const names = (ids: BrowserId[]) => ids.map((id) => BROWSER_NAMES[id]).join(', ')
+        const parts: string[] = []
+        if (applied.done.length > 0) {
+          parts.push(provider ? `Включено: ${names(applied.done)}` : `Выключено: ${names(applied.done)}`)
+        }
+        if (applied.unconfirmed.length > 0) {
+          // Яндекс Браузер сам подменяет DNS: настройку мы записали, а принял
+          // он её или нет — из реестра не видно. Об этом и говорим.
+          parts.push(
+            `${names(applied.unconfirmed)}: настройка записана, но браузер ведёт DNS сам и мог её не принять — проверьте browser://policy`
+          )
+        }
+        if (applied.busy.length > 0) {
+          parts.push(`закройте и повторите: ${names(applied.busy)}`)
+        }
+        if (applied.failed.length > 0) {
+          parts.push(`не вышло: ${names(applied.failed)}`)
+        }
+        return {
+          ok: applied.failed.length === 0,
+          message: parts.join('; ') || 'Браузеров с такой настройкой не найдено'
+        }
+      }
     }
     const fix = fixes[id]
     if (!fix) return { ok: false, message: `неизвестная починка: ${id}` }
     try {
-      return await fix()
+      return await fix(option)
     } catch (error) {
       return { ok: false, message: String(error) }
     }
@@ -439,7 +487,7 @@ export function registerIpc(): void {
       const found = await checkComponents(services.zapret, services.tgws, force)
       for (const info of found) emit('update:available', info)
       broadcastAll()
-      return { checked: found }
+      return { checked: found, versions: componentVersions(services.zapret, services.tgws) }
     } catch (error) {
       // Сеть может отвалиться в любую секунду, и это не сбой программы:
       // говорим словами, что не смогли связаться с GitHub.
@@ -546,6 +594,41 @@ export function registerIpc(): void {
     services?.tgws?.releaseGuardian()
     app.relaunch()
     app.exit(0)
+  })
+
+  /**
+   * Удаление программы.
+   *
+   * Кнопка есть всегда, но работает только у копии, поставленной установщиком:
+   * у запущенной из исходников деинсталлятора нет, и человеку об этом говорят
+   * прямо, а не подсовывают кнопку, которая ничего не делает.
+   */
+  ipcMain.handle('app:uninstallInfo', () => {
+    const target = uninstallerPath()
+    return {
+      path: target ?? '',
+      reason: target ? '' : 'деинсталлятор не найден'
+    }
+  })
+
+  ipcMain.handle('app:uninstall', async () => {
+    const target = uninstallerPath()
+    if (!target) return { ok: false, reason: 'деинсталлятор не найден' }
+    logger.write('[hub] удаление программы: ' + target)
+    try {
+      // Отсоединённо: деинсталлятор живёт своей жизнью, программа уже уходит.
+      spawn(target, [], { detached: true, stdio: 'ignore' }).unref()
+    } catch (error) {
+      return { ok: false, reason: String(error) }
+    }
+    // Закрываемся чуть погодя: иначе деинсталлятор первым делом спросит,
+    // закрыть ли запущенную программу, и человек увидит лишний вопрос.
+    setTimeout(() => {
+      services?.zapret?.releaseGuardian()
+      services?.tgws?.releaseGuardian()
+      app.quit()
+    }, 900)
+    return { ok: true, reason: target }
   })
 
   logger.write('[hub] IPC зарегистрирован')

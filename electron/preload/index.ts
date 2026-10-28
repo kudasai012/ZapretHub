@@ -64,7 +64,7 @@ const GROUPS: Record<string, readonly string[]> = {
   'app-update': ['check', 'apply'],
   shell: ['openPath', 'openUrl'],
   window: ['minimize', 'close', 'isMaximized', 'toggleMaximize'],
-  app: ['version', 'restart']
+  app: ['version', 'restart', 'uninstallInfo', 'uninstall']
 }
 
 const api: Record<string, unknown> = {}

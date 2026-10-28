@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Download, ExternalLink, FolderOpen, RefreshCw } from 'lucide-react'
+import { Download, ExternalLink, FolderOpen, RefreshCw, Trash2 } from 'lucide-react'
 import type { AppConfig, ComponentKey, HomeState, UpdateInfo } from '@shared/contract'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -48,10 +48,50 @@ export function SettingsPage({
   const t = useT(config.general.language)
   const action = useAction(t)
   const [appVersion, setAppVersion] = useState('')
+  /** Удаление программы: есть ли деинсталлятор и открыт ли вопрос. */
+  const [canUninstall, setCanUninstall] = useState(false)
+  const [askUninstall, setAskUninstall] = useState(false)
+  // секунды, которые осталось ждать: удаление необратимо, кнопка открывается
+  // не сразу, чтобы решение не принималось одним щелчком
+  const [uninstallLeft, setUninstallLeft] = useState(0)
 
   useEffect(() => {
     void window.hub.app.version().then(setAppVersion)
   }, [])
+
+  useEffect(() => {
+    void window.hub.app.uninstallInfo().then((info) => setCanUninstall(info.path !== ''))
+  }, [])
+
+  useEffect(() => {
+    if (!askUninstall) {
+      setUninstallLeft(0)
+      return
+    }
+    setUninstallLeft(CONFIRM_DELAY_MS / 1000)
+    const started = Date.now()
+    const timer = setInterval(() => {
+      const rest = Math.max(0, CONFIRM_DELAY_MS - (Date.now() - started))
+      setUninstallLeft(Math.ceil(rest / 1000))
+      if (rest <= 0) clearInterval(timer)
+    }, 250)
+    return () => clearInterval(timer)
+  }, [askUninstall])
+
+  /**
+   * Удалить программу.
+   *
+   * Деинсталлятор запускаем отсоединённо, а программу закрываем чуть позже:
+   * так он не задаёт лишний вопрос про запущенную копию. Компоненты,
+   * настройки и журналы убирает сам деинсталлятор.
+   */
+  const uninstall = async () => {
+    setAskUninstall(false)
+    const result = await window.hub.app.uninstall()
+    if (!result.ok) {
+      toast({ title: t('common.error'), description: result.reason, variant: 'destructive' })
+    }
+  }
 
   const save = (patch: Record<string, unknown>) => void action(window.hub.config.save(patch), {})
 
@@ -226,7 +266,9 @@ export function SettingsPage({
           <CardTitle className="text-sm">{t('about.title')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center gap-3">
+          {/* Удаление стоит напротив названия и версии: человек смотрит,
+              что за программа стоит, и тут же видит, как её убрать. */}
+          <div className="flex flex-wrap items-center gap-3">
             <img
               src={appIcon}
               alt=""
@@ -234,12 +276,23 @@ export function SettingsPage({
               height={44}
               className="h-11 w-11 shrink-0 rounded-md border"
             />
-            <div className="min-w-0 space-y-0.5">
+            <div className="min-w-0 flex-1 space-y-0.5">
               <p className="text-sm font-semibold">Zapret Hub</p>
               <p className="text-xs text-muted-foreground">
                 {t('set.version')}: <span className="text-foreground">{appVersion || '…'}</span>
               </p>
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              disabled={!canUninstall}
+              onClick={() => setAskUninstall(true)}
+              title={canUninstall ? t('set.uninstall_hint') : t('set.uninstall_missing')}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {t('set.uninstall')}
+            </Button>
           </div>
 
           <Separator />
@@ -264,6 +317,32 @@ export function SettingsPage({
           <p className="text-xs text-muted-foreground">{t('set.licence')}</p>
         </CardContent>
       </Card>
+
+      {/* Удаление программы: вопрос задаём здесь, а не средствами Windows.
+          Деинсталлятор стирает настройки, журналы и скачанные компоненты —
+          человек должен это прочитать до того, как нажмёт. */}
+      <Dialog open={askUninstall} onOpenChange={setAskUninstall}>
+        <DialogContent className="data-[state=closed]:animate-none">
+          <DialogHeader>
+            <DialogTitle>{t('set.uninstall')}</DialogTitle>
+            <DialogDescription className="whitespace-pre-line">
+              {t('set.uninstall_confirm')}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAskUninstall(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={uninstallLeft > 0}
+              onClick={() => void uninstall()}
+            >
+              {uninstallLeft > 0 ? `${uninstallLeft} ${t('common.sec_short')}` : t('set.uninstall')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

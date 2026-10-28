@@ -55,6 +55,9 @@ export const STATUS_CRASHED: ProcessStatus = 'crashed'
 
 const SWEEP_TIMEOUT_MS = 8000
 
+/** Сколько последних строк вывода помним на случай падения. */
+const TAIL_LINES = 40
+
 export interface ManagedOptions {
   key: string
   command: string
@@ -64,6 +67,16 @@ export interface ManagedOptions {
   onStatus?: (status: ProcessStatus, reason?: string) => void
   onLog?: (line: string) => void
   onExit?: (code: number | null) => void
+  /**
+   * Разбирает вывод компонента и называет причину падения человеческими
+   * словами.
+   *
+   * Код выхода сам по себе ни о чём не говорит: winws уходит с кодом 1 и
+   * когда порт занят, и когда в системе осталась чужая копия. Компонент
+   * знает свои сообщения, поэтому причина разбирается у него, а в журнал
+   * попадает уже понятная строка.
+   */
+  crashReason?: (output: string[]) => string
   restartOnCrash?: boolean
   restartDelayMs?: number
   /**
@@ -99,6 +112,14 @@ export class ManagedProcess {
    * сделает ничего — а копия продолжит висеть в трее.
    */
   private lastPid = 0
+  /**
+   * Последние строки, которые компонент успел сказать.
+   *
+   * Нужны в момент падения: по ним разбирается причина, и их же показываем
+   * в журнале, когда разобрать не удалось, — иначе про сбой остаётся только
+   * «код выхода 1», по которому ничего не понять.
+   */
+  private tail: string[] = []
   private readonly options: ManagedOptions
 
   constructor(options: ManagedOptions) {
@@ -136,6 +157,7 @@ export class ManagedProcess {
     if (this.isRunning()) return
     this.stopping = false
     this.reason = ''
+    this.tail = []
     this.setStatus(STATUS_STARTING)
 
     const { command, args, cwd } = this.options
@@ -158,8 +180,14 @@ export class ManagedProcess {
 
     child.stdout?.setEncoding('utf8')
     child.stderr?.setEncoding('utf8')
-    child.stdout?.on('data', (chunk: string) => this.emit(chunk.replace(/\r?\n$/, '')))
-    child.stderr?.on('data', (chunk: string) => this.emit(chunk.replace(/\r?\n$/, '')))
+    const keep = (chunk: string): void => {
+      const line = chunk.replace(/\r?\n$/, '')
+      this.tail.push(line)
+      if (this.tail.length > TAIL_LINES) this.tail.shift()
+      this.emit(line)
+    }
+    child.stdout?.on('data', keep)
+    child.stderr?.on('data', keep)
 
     child.on('error', (error) => {
       this.emit(`[hub] ошибка процесса: ${error.message}`)
@@ -174,7 +202,16 @@ export class ManagedProcess {
         return
       }
       this.emit(`[hub] процесс завершился с кодом ${code}`)
-      this.setStatus(code === 0 ? STATUS_STOPPED : STATUS_CRASHED, `код выхода ${code}`)
+      if (code === 0) {
+        this.setStatus(STATUS_STOPPED)
+        return
+      }
+      /* Падение: в журнал уходит не только сам факт, но и причина. Раньше
+         после сбоя в журнале оставалось «перезапуск после сбоя» — и почему
+         компонент упал, по журналу понять было нельзя. */
+      const why = this.crashReason(code)
+      this.emit(`[hub] падение: ${why}`)
+      this.setStatus(STATUS_CRASHED, why)
       this.scheduleRestart()
     })
 
@@ -292,6 +329,23 @@ export class ManagedProcess {
     } catch {
       /* дерево не снялось — подчистим по имени, это надёжнее догадок */
     }
+  }
+
+  /**
+   * Причина падения человеческими словами.
+   *
+   * Сначала спрашиваем компонент: он знает свои сообщения. Не разобралось —
+   * говорим код выхода и последнюю строку, которую компонент успел сказать:
+   * пусть сыро, но видно, на чём он споткнулся.
+   */
+  private crashReason(code: number | null): string {
+    const parsed = this.options.crashReason?.(this.tail.slice()) ?? ''
+    if (parsed) return parsed
+    const last = this.tail.filter((line) => line.trim() !== '').slice(-1)[0]?.trim() ?? ''
+    const exit = `код выхода ${code ?? '—'}`
+    if (!last) return exit
+    const short = last.length > 160 ? `${last.slice(0, 157)}…` : last
+    return `${exit}: ${short}`
   }
 
   private scheduleRestart(): void {

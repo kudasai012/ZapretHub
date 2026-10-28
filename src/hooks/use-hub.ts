@@ -280,15 +280,22 @@ export function useAction(t: (key: string, params?: Record<string, string | numb
   return useCallback(
     async <T,>(
       promise: Promise<T>,
-      messages: { success?: string; failure?: string }
+      // hint — короткая добавочная строка к удаче: что это значит или что
+      // делать дальше. Без неё сообщение вроде «Цели сохранены» оставляет
+      // человека в недоумении, применилось ли это прямо сейчас.
+      messages: { success?: string; hint?: string; failure?: string }
     ): Promise<T | null> => {
       try {
         const result = await promise
-        if (messages.success) toast({ title: messages.success, variant: 'success' })
+        if (messages.success) {
+          toast({ title: messages.success, description: messages.hint, variant: 'success' })
+        }
         return result
       } catch (error) {
         toast({
-          title: messages.failure ?? t('common.error'),
+          // «Ошибка» не говорило ничего: непонятно, что именно сорвалось.
+          // Причина всё равно приходит второй строкой.
+          title: messages.failure ?? t('common.failed'),
           description: error instanceof Error ? error.message : String(error),
           variant: 'destructive'
         })

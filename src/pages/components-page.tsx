@@ -10,6 +10,7 @@ import {
   Gamepad2,
   Globe,
   ListTree,
+  Loader2,
   Radio,
   RotateCcw,
   Route,
@@ -20,6 +21,7 @@ import {
 import type {
   AppConfig,
   ComponentKey,
+  ComponentVersion,
   TgwsState,
   UpdateInfo,
   ZapretState
@@ -38,6 +40,14 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
 import { StatusDot, statusTone } from '@/components/status-dot'
 import { cn } from '@/lib/utils'
 import { listNote, listTitle } from '@/lib/list-names'
@@ -61,13 +71,15 @@ export function ComponentsPage({
   onRefresh: () => void
 }) {
   const t = useT(config.general.language)
-  const action = useAction(t)
   const [tgws, setTgws] = useState<TgwsState | null>(null)
   const [available, setAvailable] = useState<UpdateInfo[]>([])
+  /** Что известно о версии каждого компонента: и когда обновление есть, и когда его нет. */
+  const [versions, setVersions] = useState<ComponentVersion[]>([])
+  /** Окно «Проверить обновления». */
+  const [updatesOpen, setUpdatesOpen] = useState(false)
   // свёрнутость панелей запоминается: сменил раздел — вернулся, всё как оставил
   const [openZapret, setOpenZapret] = useRemembered('zapret.panel.zapret', true)
   const [openTgws, setOpenTgws] = useRemembered('zapret.panel.tgws', true)
-  const [busyAll, setBusyAll] = useState(false)
 
   const refresh = useCallback(async () => {
     setTgws(await window.hub.tgws.snapshot())
@@ -81,7 +93,7 @@ export function ComponentsPage({
     void refresh()
     const off = window.hub.on('tgws:state', setTgws)
     // версии спрашиваем молча: «Доступно 1.10.4» под названием компонента
-    void window.hub.updates.check(false).then((result) => setAvailable(result.checked)).catch(() => {})
+    void checkVersions(false).catch(() => {})
     return off
   }, [refresh])
 
@@ -91,13 +103,32 @@ export function ComponentsPage({
    * Иначе плашка «Доступно 1.10.4» остаётся висеть над компонентом, который
    * только что обновили, — и человек не понимает, обновилось или нет.
    */
+  /**
+   * Спрашивает версии у главного процесса.
+   *
+   * Ответ честный: про каждый компонент известно, удалось ли спросить GitHub.
+   * Без этого «всё свежее» и «проверить не удалось» выглядели одинаково.
+   */
+  const checkVersions = useCallback(
+    (force: boolean) =>
+      window.hub.updates.check(force).then((result) => {
+        setAvailable(result.checked)
+        setVersions(result.versions)
+        return result
+      }),
+    []
+  )
+
   const versionsChanged = useCallback(() => {
-    void window.hub.updates.check(true).then((result) => setAvailable(result.checked)).catch(() => {})
-  }, [])
+    void checkVersions(true)
+  }, [checkVersions])
 
   const installed = { zapret: zapret?.installed ?? false, tgws: tgws?.installed ?? false }
-  const anyMissing = !installed.zapret || !installed.tgws
   const anyUpdate = available.length > 0
+
+  /** Сводка по компоненту: ту же порцию сведений видит и окно обновлений. */
+  const stateOf = (key: ComponentKey): ComponentVersion | null =>
+    versions.find((item) => item.key === key) ?? null
 
   return (
     <div className="space-y-5">
@@ -107,52 +138,34 @@ export function ComponentsPage({
           <p className="text-sm text-muted-foreground">{t('components.subtitle')}</p>
         </div>
 
-        {/* Общая кнопка: ставит всё, если чего-то не хватает, иначе обновляет всё.
-            Если обновляться нечему — говорит об этом, а не качает заново. */}
-        <Button
-          size="sm"
-          disabled={busyAll}
-          onClick={() => {
-            if (!anyMissing && !anyUpdate) {
-              // Всё уже свежее свежего: раньше кнопка молча качала компоненты
-              // заново, и человек не понимал, зачем она ему понадобилась.
-              toast({ title: t('upd.actual_all'), variant: 'success' })
-              return
-            }
-            void action(
-              (async () => {
-                setBusyAll(true)
-                try {
-                  const lines: string[] = []
-                  for (const key of ['zapret', 'tgws'] as ComponentKey[]) {
-                    const result = await window.hub.updates.apply(key)
-                    lines.push(result.message)
-                  }
-                  onRefresh()
-                  await refresh()
-                  await versionsChanged()
-                  return lines.join('\n')
-                } finally {
-                  setBusyAll(false)
-                }
-              })(),
-              {
-                success: t(anyMissing ? 'upd.install_all' : 'upd.update_all'),
-                failure: t('upd.update_failed')
-              }
-            )
-          }}
-        >
-          <Download className="h-3.5 w-3.5" />
-          {anyMissing ? t('upd.install_all') : t('upd.update_all')}
-          {anyUpdate && !anyMissing ? ` · ${available.length}` : ''}
+        {/* Проверка обновлений. Раньше здесь была кнопка «Обновить всё»:
+            при её нажатии компоненты перекачивались заново, даже когда
+            обновляться было нечему. Теперь кнопка только спрашивает GitHub,
+            а обновляет человек — в окне, где видно обе версии. */}
+        <Button size="sm" onClick={() => setUpdatesOpen(true)}>
+          <RotateCcw className="h-3.5 w-3.5" />
+          {t('upd.check_all')}
+          {anyUpdate ? ` · ${available.length}` : ''}
         </Button>
       </header>
+
+      <UpdatesDialog
+        open={updatesOpen}
+        onOpenChange={setUpdatesOpen}
+        versions={versions}
+        installed={installed}
+        onCheck={() => checkVersions(true)}
+        onRefresh={() => {
+          onRefresh()
+          void refresh()
+        }}
+        t={t}
+      />
 
       <ZapretPanel
         config={config}
         zapret={zapret}
-        info={available.find((item) => item.key === 'zapret') ?? null}
+        state={stateOf('zapret')}
         open={openZapret}
         onToggleOpen={() => setOpenZapret(!openZapret)}
         onRefresh={onRefresh}
@@ -162,7 +175,7 @@ export function ComponentsPage({
 
       <TgwsPanel
         tgws={tgws}
-        info={available.find((item) => item.key === 'tgws') ?? null}
+        state={stateOf('tgws')}
         open={openTgws}
         onToggleOpen={() => setOpenTgws(!openTgws)}
         onRefresh={onRefresh}
@@ -170,6 +183,131 @@ export function ComponentsPage({
         t={t}
       />
     </div>
+  )
+}
+
+/**
+ * Окно «Проверить обновления».
+ *
+ * Раньше на странице висела кнопка «Обновить всё»: она молча перекачивала
+ * оба компонента, даже когда обновляться было нечему. Теперь кнопка только
+ * спрашивает GitHub, а решение принимает человек — видя обе версии рядом:
+ * какая стоит и какая вышла. Кнопка «Обновить» доступна только там, где
+ * обновление и правда есть.
+ */
+function UpdatesDialog({
+  open,
+  onOpenChange,
+  versions,
+  installed,
+  onCheck,
+  onRefresh,
+  t
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  versions: ComponentVersion[]
+  installed: Record<ComponentKey, boolean>
+  onCheck: () => Promise<unknown>
+  onRefresh: () => void
+  t: (key: string, params?: Record<string, string | number>) => string
+}) {
+  const [checking, setChecking] = useState(false)
+  const [busy, setBusy] = useState<ComponentKey | null>(null)
+
+  // Открыли — сразу спрашиваем GitHub: человек пришёл за свежими сведениями,
+  // а не за теми, что программа запомнила при запуске.
+  useEffect(() => {
+    if (!open) return
+    setChecking(true)
+    void onCheck().finally(() => setChecking(false))
+  }, [open])
+
+  const apply = async (key: ComponentKey) => {
+    setBusy(key)
+    try {
+      const result = await window.hub.updates.apply(key)
+      toast({
+        title: result.ok ? t('upd.updated') : t('upd.update_failed'),
+        description: result.message,
+        variant: result.ok ? 'success' : 'destructive'
+      })
+      onRefresh()
+      // после обновления версии другие: переспрашиваем, чтобы кнопка погасла
+      setChecking(true)
+      await onCheck()
+    } finally {
+      setChecking(false)
+      setBusy(null)
+    }
+  }
+
+  const rows = (['zapret', 'tgws'] as ComponentKey[]).map((key) => {
+    const item = versions.find((entry) => entry.key === key) ?? null
+    const isInstalled = installed[key]
+    const canUpdate = isInstalled && item?.hasUpdate === true
+    const note = !item
+      ? t('common.loading')
+      : !item.known
+        ? t('upd.no_info_short')
+        : item.hasUpdate
+          ? `${t('upd.latest_short')} ${item.latest}`
+          : t('upd.up_to_date_short')
+
+    return (
+      <div key={key} className="flex items-center gap-3 rounded-md border px-3 py-2.5">
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{key === 'zapret' ? t('nav.zapret') : t('nav.tgws')}</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {t('upd.installed')} {item?.current || '—'} · {note}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant={canUpdate || !isInstalled ? 'default' : 'outline'}
+          className="shrink-0"
+          disabled={busy !== null || checking || (isInstalled && !canUpdate)}
+          onClick={() => void apply(key)}
+          title={isInstalled && !canUpdate ? t('upd.actual_all') : ''}
+        >
+          {busy === key ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : checking ? (
+            <RotateCcw className="h-3.5 w-3.5" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          {isInstalled ? t('upd.update_one') : t('upd.install_one')}
+        </Button>
+      </div>
+    )
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="data-[state=closed]:animate-none sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t('upd.check_all')}</DialogTitle>
+          <DialogDescription className="text-xs">{t('upd.check_dialog_hint')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-2">
+          {checking ? (
+            <p className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t('upd.checking')}
+            </p>
+          ) : null}
+          {rows}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {t('common.close')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -185,7 +323,8 @@ function PanelHeader({
   title,
   subtitle,
   installed,
-  info,
+  version,
+  state,
   open,
   onToggle,
   onApply,
@@ -195,12 +334,30 @@ function PanelHeader({
   title: string
   subtitle: string
   installed: boolean
-  info: UpdateInfo | null
+  /** Какая версия стоит: видно даже тогда, когда свежую узнать не удалось. */
+  version: string
+  /** Что известно о версии: вышла ли новая и удалось ли спросить GitHub. */
+  state: ComponentVersion | null
   open: boolean
   onToggle: () => void
   onApply: () => void
   t: (key: string, params?: Record<string, string | number>) => string
 }) {
+  /*
+   * Кнопка только по делу: «Установить» — когда компонента нет, «Обновить» —
+   * когда вышла новая версия. Раньше «Обновить» стояла всегда, и нажатие
+   * перекачивало компонент заново, хотя обновляться было нечему.
+   *
+   * Надпись следует за правдой и не мигает: версию называем устаревшей только
+   * когда точно знаем, что на GitHub вышла другая. Проверки не было — проверка
+   * выключена или до GitHub не достучались — пишем просто что стоит. Раньше
+   * в этом случае вспыхивала «устаревшая версия» и тут же сменялась
+   * «установлено»: человек видел про себя неправду на первом же кадре.
+   */
+  const outdated = installed && state?.hasUpdate === true
+  const showApply = !installed || outdated
+  const knownVersion = version && version !== '—'
+  const shownVersion = state?.current || version
   return (
     <CardHeader className="p-0">
       <button
@@ -222,40 +379,38 @@ function PanelHeader({
         {/* Кнопка вне области сворачивания: щелчок по ней не должен
             складывать панель. Стоит слева от статуса версии — сначала
             действие, потом его результат. */}
-        <span
-          className="shrink-0"
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
-          role="presentation"
-        >
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 gap-1.5 text-xs"
-            onClick={onApply}
-            title={t(installed ? 'upd.update_one' : 'upd.install_one')}
+        {showApply ? (
+          <span
+            className="shrink-0"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            role="presentation"
           >
-            <Download className="h-3 w-3" />
-            {installed ? t('upd.update_one') : t('upd.install_one')}
-          </Button>
-        </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1.5 text-xs"
+              onClick={onApply}
+              title={t(!installed ? 'upd.install_one' : 'upd.update_one')}
+            >
+              <Download className="h-3 w-3" />
+              {!installed ? t('upd.install_one') : t('upd.update_one')}
+            </Button>
+          </span>
+        ) : null}
 
         {/* Мини-окно версии: что стоит и что вышло. */}
         <span className="flex shrink-0 items-center gap-1.5">
           {!installed ? (
             <Badge variant="warning">{t('common.not_installed')}</Badge>
-          ) : info ? (
-            <>
-              <Badge variant="muted">
-                {t('comp.installed_version')} {info.current}
-              </Badge>
-              <Badge variant="success">
-                {t('comp.available_version')} {info.latest}
-              </Badge>
-            </>
-          ) : (
-            <Badge variant="muted">{t('upd.up_to_date')}</Badge>
-          )}
+          ) : outdated ? (
+            <Badge variant="warning">{t('upd.outdated_version', { version: shownVersion })}</Badge>
+          ) : knownVersion ? (
+            <Badge variant="muted">
+              {t('comp.installed_version')} {shownVersion}
+            </Badge>
+          ) : null}
+
         </span>
 
         <ChevronDown
@@ -350,7 +505,7 @@ const SECTION_ICONS = {
 function ZapretPanel({
   config,
   zapret,
-  info,
+  state,
   open,
   onToggleOpen,
   onRefresh,
@@ -359,7 +514,7 @@ function ZapretPanel({
 }: {
   config: AppConfig
   zapret: ZapretState | null
-  info: UpdateInfo | null
+  state: ComponentVersion | null
   open: boolean
   onToggleOpen: () => void
   onRefresh: () => void
@@ -371,6 +526,8 @@ function ZapretPanel({
   const [listName, setListName] = useState<string | null>(null)
   const [listText, setListText] = useState('')
   const [busy, setBusy] = useState(false)
+  /** Само поле списка: нужно, чтобы вернуть прокрутку в начало. */
+  const listField = useRef<HTMLTextAreaElement | null>(null)
   /** Ставит или обновляет компонент; кнопка стоит в шапке панели. */
   const applyUpdate = () => {
     void action(window.hub.updates.apply('zapret'), {
@@ -383,11 +540,36 @@ function ZapretPanel({
     })
   }
 
+  /**
+   * Держим список в начале.
+   *
+   * Текст приходит не сразу: поле появляется пустым, а через мгновение
+   * заполняется — и браузер уводит прокрутку туда, где оказался курсор, то
+   * есть в самый низ. Человек открывал список адресов и видел его хвост, а не
+   * начало. После загрузки возвращаем курсор и прокрутку наверх.
+   */
+  const scrollToListStart = useRef(false)
+
+  useEffect(() => {
+    if (!scrollToListStart.current) return
+    scrollToListStart.current = false
+    const field = listField.current
+    if (!field) return
+    field.setSelectionRange(0, 0)
+    field.scrollTop = 0
+  }, [listText])
+
   if (!zapret) return null
 
   const openList = async (name: string) => {
+    // Сначала читаем файл, потом показываем поле. Раньше поле появлялось
+    // пустым и тут же заполнялось: браузер ставил курсор в конец текста и
+    // уводил прокрутку в самый низ — человек открывал список и видел его
+    // хвост. С готовым текстом поле рождается в начале.
+    const text = await window.hub.zapret.readList(name)
+    setListText(text)
     setListName(name)
-    setListText(await window.hub.zapret.readList(name))
+    scrollToListStart.current = true
   }
 
   /**
@@ -457,7 +639,8 @@ function ZapretPanel({
         title={t('zapret.title')}
         subtitle="Flowseal / zapret-discord-youtube"
         installed={zapret.installed}
-        info={info}
+        version={zapret.version}
+        state={state}
         open={open}
         onToggle={onToggleOpen}
         onApply={applyUpdate}
@@ -602,13 +785,17 @@ function ZapretPanel({
 
             {listName ? (
               <div className="space-y-2 pt-1">
+                {/* Высота одна и та же всегда: список длинный, прокрутка
+                    своя, а размер поля человек не настраивает — тянуть за
+                    угол незачем, и высота не гуляет от списка к списку. */}
                 <textarea
+                  ref={listField}
                   value={listText}
                   onChange={(event) => setListText(event.target.value)}
                   spellCheck={false}
                   aria-label={listTitle(listName, config.general.language)}
                   title={`${listTitle(listName, config.general.language)} — ${listNote(listName, config.general.language)}`}
-                  className="h-48 w-full resize-y rounded-md border border-input bg-transparent p-3 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="block h-56 w-full resize-none overflow-y-auto rounded-md border border-input bg-transparent p-3 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 />
                 <div className="flex gap-2">
                   <Button size="sm" onClick={() => void saveList()} disabled={busy}>
@@ -666,7 +853,7 @@ function ZapretPanel({
 
 function TgwsPanel({
   tgws,
-  info,
+  state,
   open,
   onToggleOpen,
   onRefresh,
@@ -674,7 +861,7 @@ function TgwsPanel({
   t
 }: {
   tgws: TgwsState | null
-  info: UpdateInfo | null
+  state: ComponentVersion | null
   open: boolean
   onToggleOpen: () => void
   onRefresh: () => void
@@ -712,7 +899,8 @@ function TgwsPanel({
         title={t('tgws.title')}
         subtitle="Flowseal / tg-ws-proxy"
         installed={tgws.installed}
-        info={info}
+        version={tgws.version}
+        state={state}
         open={open}
         onToggle={onToggleOpen}
         onApply={applyUpdate}

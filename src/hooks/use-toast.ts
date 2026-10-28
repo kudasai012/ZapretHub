@@ -1,5 +1,5 @@
 import * as React from 'react'
-type ToastVariant = 'default' | 'success' | 'warning' | 'destructive'
+export type ToastVariant = 'default' | 'success' | 'warning' | 'destructive'
 
 interface ToastState {
   id: string
@@ -36,7 +36,8 @@ function toast(input: { title: string; description?: string; variant?: ToastVari
     { id, title: input.title, description: input.description, variant: input.variant ?? 'default', open: true }
   ]
   emit()
-  setTimeout(() => dismiss(id), 4200)
+  // с пояснением читать дольше — держим сообщение дольше
+  setTimeout(() => dismiss(id), input.description ? 6500 : 4200)
   return id
 }
 

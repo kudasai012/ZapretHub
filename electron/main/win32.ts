@@ -110,13 +110,31 @@ function runSyncHidden(file: string, args: string[]): number {
 
 export type ServiceState = 'RUNNING' | 'STOPPED' | 'START_PENDING' | 'STOP_PENDING' | 'UNKNOWN' | 'NOT_FOUND'
 
+/**
+ * Состояние службы.
+ *
+ * Спрашиваем Get-Service, а не разбираем вывод `sc query`: sc печатает состояние
+ * на языке системы, и на русской Windows строка просто не узнавалась — проверка
+ * показывала сырое «UNKNOWN» вместо понятного ответа.
+ */
 export async function queryService(name: string): Promise<ServiceState> {
   if (!IS_WINDOWS) return 'NOT_FOUND'
-  const result = await run('sc', ['query', name])
-  if (result.code !== 0) return 'NOT_FOUND'
-  const match = /STATE\s*:\s*\d+\s+(\w+)/i.exec(result.stdout)
-  if (!match) return 'UNKNOWN'
-  return match[1].toUpperCase() as ServiceState
+  const safe = name.replace(/'/g, "''")
+  const ps =
+    `$s = Get-Service -Name '${safe}' -ErrorAction SilentlyContinue; ` +
+    "if ($null -eq $s) { 'NOT_FOUND' } else { $s.Status.ToString().ToUpperInvariant() }"
+  const result = await powershell(ps, 15000)
+  const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const state = (lines[lines.length - 1] ?? '').toUpperCase()
+  if (state === 'NOT_FOUND') return 'NOT_FOUND'
+  if (state === '') {
+    // PowerShell не ответил — пробуем старый путь, чтобы не врать про «нет службы»
+    const sc = await run('sc', ['query', name])
+    if (sc.code !== 0) return 'NOT_FOUND'
+    const match = /STATE\s*:\s*\d+\s+(\w+)/i.exec(sc.stdout)
+    return match ? (match[1].toUpperCase() as ServiceState) : 'UNKNOWN'
+  }
+  return state as ServiceState
 }
 
 export async function removeService(name: string): Promise<boolean> {
@@ -184,9 +202,51 @@ export async function killForeignProcesses(image: string, ownPids: Set<number>):
 }
 
 /** Включает TCP-метки времени — без них часть стратегий не работает. */
+const TCP_PARAM_KEY = 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters'
+
+/**
+ * Значение Tcp1323Opts: бит 0 — масштабирование окна, бит 1 — метки времени.
+ * null — значения в реестре нет, действует встроенный по умолчанию.
+ *
+ * Читаем реестр, а не вывод `netsh interface tcp show global`: netsh печатает
+ * названия параметров на языке системы, поэтому на русской Windows подстрока
+ * «timestamps» в выводе не находилась и проверка вечно показывала «выключено» —
+ * даже сразу после того, как метки включили.
+ */
+export async function tcpTimestampsOpt(): Promise<number | null> {
+  if (!IS_WINDOWS) return null
+  const ps =
+    "$v = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters' " +
+    "-Name Tcp1323Opts -ErrorAction SilentlyContinue).Tcp1323Opts; " +
+    "if ($null -eq $v) { '' } else { [int]$v }"
+  const result = await powershell(ps, 15000)
+  const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const value = Number.parseInt(lines[lines.length - 1] ?? '', 10)
+  return Number.isFinite(value) ? value : null
+}
+
+/** Включены ли метки времени: бит 1 в Tcp1323Opts. */
+export function timestampsOn(opt: number | null): boolean {
+  return opt !== null && (opt & 2) !== 0
+}
+
+/**
+ * Включает метки времени, не выключая по пути масштабирование окна.
+ *
+ * Один netsh сбрасывает Tcp1323Opts целиком в 2: метки появляются, а
+ * масштабирование окна гаснет. Поэтому сначала netsh — чтобы подействовало на
+ * уже работающие соединения, — потом реестр, где выставлен только нужный бит.
+ */
 export async function enableTcpTimestamps(): Promise<boolean> {
   if (!IS_WINDOWS) return false
-  const result = await run('netsh', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], 10000)
+  await run('netsh', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], 10000)
+  const current = await tcpTimestampsOpt()
+  const next = (current ?? 3) | 2
+  const result = await run(
+    'reg',
+    ['add', TCP_PARAM_KEY, '/v', 'Tcp1323Opts', '/t', 'REG_DWORD', '/d', String(next), '/f'],
+    10000
+  )
   return result.code === 0
 }
 

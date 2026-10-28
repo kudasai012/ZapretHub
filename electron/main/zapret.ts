@@ -538,6 +538,9 @@ export class ZapretComponent {
         output.push(line)
         logger.writeTo('zapret.log', line)
       },
+      // Причину падения разбираем по выводу winws: «A copy of winws is
+      // already running» понятнее, чем «код выхода 1».
+      crashReason: (lines) => winwsFailureReason(lines),
       onStatus: (status) => {
         if (status === 'crashed') {
           this.reason = this.proc?.currentReason || winwsFailureReason(output) || 'процесс завершился'

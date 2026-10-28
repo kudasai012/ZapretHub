@@ -144,7 +144,7 @@ export interface DiagnosticsTargetResult {
 export type SysStatus = 'ok' | 'warn' | 'fail' | 'info'
 
 /** Что можно починить кнопкой. */
-export type SysFix = 'windivert' | 'conflicts' | 'zapret-service' | 'timestamps' | 'discord'
+export type SysFix = 'windivert' | 'conflicts' | 'zapret-service' | 'timestamps' | 'discord' | 'doh'
 
 export interface SysCheck {
   /** Устойчивое имя: по нему интерфейс берёт подпись из своего словаря. */
@@ -162,6 +162,27 @@ export interface UpdateInfo {
   latest: string
   url: string
   notes: string
+}
+
+/**
+ * Что известно о версии компонента.
+ *
+ * Раньше проверка отдавала только список тех, кому пора обновиться, и
+ * интерфейс не отличал «проверили — всё свежее» от «проверить не удалось».
+ * Из-за этого приходилось либо врать «актуальная версия», либо пугать
+ * «устаревшей». Теперь ответ честный: latest пуст, если GitHub спросить
+ * не вышло, и known говорит, можно ли на этот ответ опираться.
+ */
+export interface ComponentVersion {
+  key: ComponentKey
+  /** Что стоит у человека. */
+  current: string
+  /** Последняя версия на GitHub. Пусто, если узнать не удалось. */
+  latest: string
+  /** Удалось ли спросить GitHub. */
+  known: boolean
+  /** Есть ли что обновлять. */
+  hasUpdate: boolean
 }
 
 export interface AppUpdateInfo {
@@ -318,11 +339,18 @@ export interface HubApi {
     /** Проверки системы: то же, что делает service.bat пакета zapret. */
     run(): Promise<SysCheck[]>
     /** Починить то, что можно: служба WinDivert, чужие обходы, кэш Discord. */
-    fix(id: SysFix): Promise<{ ok: boolean; message: string }>
+    /**
+     * Починить то, что можно: служба WinDivert, чужие обходы, кэш Discord,
+     * зашифрованный DNS в браузерах.
+     *
+     * `option` — уточнение; для «doh» это адрес провайдера или «off».
+     */
+    fix(id: SysFix, option?: string): Promise<{ ok: boolean; message: string }>
   }
 
   updates: {
-    check(force: boolean): Promise<{ checked: UpdateInfo[] }>
+    /** Проверяет обновления. force — проверить, даже если срок не вышел. */
+    check(force: boolean): Promise<{ checked: UpdateInfo[]; versions: ComponentVersion[] }>
     apply(key: ComponentKey): Promise<{ ok: boolean; message: string }>
   }
 
@@ -346,6 +374,10 @@ export interface HubApi {
   app: {
     /** Версия программы. */
     version(): Promise<string>
+    /** Где лежит деинсталлятор. Пустой путь — программа запущена не из установки. */
+    uninstallInfo(): Promise<{ path: string; reason: string }>
+    /** Запускает деинсталлятор и закрывает программу. */
+    uninstall(): Promise<{ ok: boolean; reason: string }>
     /**
      * Перезапускает программу.
      *

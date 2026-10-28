@@ -316,10 +316,31 @@ function grantUsersAccess(dir: string): void {
   }
 }
 
+/**
+ * Где лежит деинсталлятор.
+ *
+ * Имя у него зависит от настроек установщика: NSIS называет файл по-разному —
+ * `unins000.exe`, а если задано имя удаления — «Uninstall Zapret Hub.exe».
+ * Поэтому не гадаем по одному имени, а смотрим, что реально лежит в папке
+ * программы: сначала точные имена, потом любой подходящий файл.
+ */
 export function uninstallerPath(): string | null {
   if (!app.isPackaged) return null
-  const candidate = path.join(BASE_DIR, 'unins000.exe')
-  return fs.existsSync(candidate) ? candidate : null
+  const wanted = ['Uninstall Zapret Hub.exe', 'unins000.exe']
+  for (const name of wanted) {
+    const candidate = path.join(BASE_DIR, name)
+    if (fs.existsSync(candidate)) return candidate
+  }
+  try {
+    const found = fs
+      .readdirSync(BASE_DIR)
+      .filter((name) => /^(unins\d*|uninstall .+)\.exe$/i.test(name))
+      .sort()
+    if (found.length) return path.join(BASE_DIR, found[0])
+  } catch {
+    /* папка не читается — значит, и удалять нечего */
+  }
+  return null
 }
 
 /**

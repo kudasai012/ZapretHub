@@ -10,7 +10,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { app, shell } from 'electron'
-import type { AppUpdateInfo, ComponentKey, UpdateInfo, UpdateProgress } from '@shared/contract'
+import type {
+  AppUpdateInfo,
+  ComponentKey,
+  ComponentVersion,
+  UpdateInfo,
+  UpdateProgress
+} from '@shared/contract'
 import { BACKUPS_DIR } from './paths'
 import { configStore, dueForCheck, tmpDir } from './config'
 import { emit } from './ipc'
@@ -97,6 +103,42 @@ async function latestRelease(repo: string): Promise<GitHubRelease | null> {
   }
 }
 
+/**
+ * Последние версии, которые удалось увидеть на GitHub в этой работе программы.
+ *
+ * Помним по компоненту отдельно и только до перезапуска: недельной давности
+ * сведения назвать «последними» нельзя, поэтому при каждом запуске таблица
+ * пуста, пока проверка не пройдёт заново.
+ */
+const lastSeen: Record<ComponentKey, string> = { zapret: '', tgws: '' }
+
+/**
+ * Что известно о версиях компонентов прямо сейчас.
+ *
+ * Отвечает и тогда, когда проверка не проводилась: тогда known ложь, и
+ * интерфейс не имеет права называть версию ни свежей, ни устаревшей.
+ */
+export function componentVersions(
+  zapret: ZapretComponent,
+  tgws: TgWsComponent
+): ComponentVersion[] {
+  const current: Record<ComponentKey, string> = {
+    zapret: zapret.version() ?? '',
+    tgws: tgws.version() ?? ''
+  }
+  return (['zapret', 'tgws'] as ComponentKey[]).map((key) => {
+    const latest = lastSeen[key]
+    const installed = current[key]
+    return {
+      key,
+      current: installed,
+      latest,
+      known: latest !== '',
+      hasUpdate: latest !== '' && installed !== '' && compareVersions(latest, installed) > 0
+    }
+  })
+}
+
 /** Ищет обновления компонентов. */
 export async function checkComponents(
   zapret: ZapretComponent,
@@ -119,6 +161,9 @@ export async function checkComponents(
     const release = await latestRelease(REPOS[key])
     if (!release?.tag_name) continue
     const latest = release.tag_name.replace(/^v/, '')
+    // запоминаем и равную версию: иначе «проверили — всё свежее» не отличить
+    // от «проверить не удалось»
+    lastSeen[key] = latest
     if (compareVersions(latest, current[key]) > 0) {
       found.push({
         key,

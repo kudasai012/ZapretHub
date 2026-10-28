@@ -1,6 +1,6 @@
 {
   "name": "zapret-hub",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Zapret Hub — единая точка управления zapret-discord-youtube и TG WS Proxy",
   "main": "./out/main/index.js",
   "author": "Zapret Hub",
