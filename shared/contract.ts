@@ -315,6 +315,14 @@ export interface HubApi {
     checkOne(target: string): Promise<DiagnosticsTargetResult>
     testStrategy(strategy: string): Promise<{ strategy: string; results: DiagnosticsTargetResult[] }>
     checkAll(): Promise<DiagnosticsTargetResult[]>
+    /**
+     * Проверить стратегию, которая выбрана сейчас.
+     *
+     * Не то же, что testStrategy: ту сначала применяют, а эту проверяют как
+     * есть. Работающий обход не трогаем вовсе — иначе главная страница гасила
+     * бы обход ради проверки и человек оставался бы без связи на минуту.
+     */
+    probeCurrent(): Promise<{ ok: boolean; reason: string; results: DiagnosticsTargetResult[] }>
     probeAll(): Promise<{ anyOk: boolean; results: DiagnosticsTargetResult[] }>
     /** Идёт ли прогон прямо сейчас, и какую стратегию он проверяет. */
     status(): Promise<{ busy: boolean; strategy: string | null; done: number; total: number }>

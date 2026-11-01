@@ -541,35 +541,33 @@ function ZapretPanel({
   }
 
   /**
-   * Держим список в начале.
+   * Держим список в конце.
    *
-   * Текст приходит не сразу: поле появляется пустым, а через мгновение
-   * заполняется — и браузер уводит прокрутку туда, где оказался курсор, то
-   * есть в самый низ. Человек открывал список адресов и видел его хвост, а не
-   * начало. После загрузки возвращаем курсор и прокрутку наверх.
+   * Адреса дописывают вниз, поэтому человеку нужен хвост: он открывает файл,
+   * чтобы добавить строку в конец, а не чтобы читать начало. Курсор ставим
+   * туда же — в самый конец текста, чтобы можно было сразу печатать.
    */
-  const scrollToListStart = useRef(false)
+  const scrollToListEnd = useRef(false)
 
   useEffect(() => {
-    if (!scrollToListStart.current) return
-    scrollToListStart.current = false
+    if (!scrollToListEnd.current) return
+    scrollToListEnd.current = false
     const field = listField.current
     if (!field) return
-    field.setSelectionRange(0, 0)
-    field.scrollTop = 0
+    field.setSelectionRange(field.value.length, field.value.length)
+    field.scrollTop = field.scrollHeight
   }, [listText])
 
   if (!zapret) return null
 
   const openList = async (name: string) => {
-    // Сначала читаем файл, потом показываем поле. Раньше поле появлялось
-    // пустым и тут же заполнялось: браузер ставил курсор в конец текста и
-    // уводил прокрутку в самый низ — человек открывал список и видел его
-    // хвост. С готовым текстом поле рождается в начале.
+    // Сначала читаем файл, потом показываем поле: поле рождается сразу с
+    // текстом, иначе прокрутку уводит туда, где оказался курсор.
     const text = await window.hub.zapret.readList(name)
     setListText(text)
     setListName(name)
-    scrollToListStart.current = true
+    // в конец — туда, куда дописывают адреса
+    scrollToListEnd.current = true
   }
 
   /**

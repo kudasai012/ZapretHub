@@ -5,10 +5,9 @@
  * а без администратора он не стартует. Поэтому при запуске проверяем права и,
  * если их нет, просим пользователя подняться через UAC.
  */
-import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, screen, shell, ipcMain } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
-import { isUiClose, resetUiClose } from './close-intent'
 import { configStore, tmpDir } from './config'
 import { ensureDirs, BASE_DIR, APP_DIR_NAME, DATA_ROOT } from './paths'
 import { logger } from './logger'
@@ -18,6 +17,7 @@ import { announceUpdates, attachServices, broadcastAll, emit, registerIpc } from
 import {
   isAdmin,
   LOGIN_ARG,
+  openWindowToShell,
   relaunchElevated,
   setAutostart,
   startedAtLogin,
@@ -35,16 +35,39 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let zapret: ZapretComponent
 let tgws: TgWsComponent
+/** Программа выходит по-настоящему: свои обходы она уже погасила. */
 let quitting = false
+/** Система завершает работу или пользователь выходит из Windows. */
+let sessionEnding = false
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL
 
-function createWindow(): void {
+/**
+ * Создаём окно.
+ *
+ * `showNow` — окно просят показать сразу: так бывает, когда человек щёлкает по
+ * иконке в трее, а окна нет (см. showWindow). Обычный запуск решает сам: при
+ * «запускать свёрнутым» и при входе в Windows окно не показывается.
+ */
+function createWindow(showNow = false): void {
   const config = configStore.get()
 
+  /**
+   * Размер окна по умолчанию: главная должна помещаться целиком.
+   *
+   * С результатами проверки стратегии страница выходит на ~880 px, и при
+   * прежних 860 px человек получал полосу прокрутки сразу после открытия —
+   * хотя кнопок на экране прибавилось всего одна. Расти выше экрана нельзя:
+   * на ноутбуке с 768 px по вертикали окно уехало бы за край, поэтому
+   *поэтому опираемся на рабочую область экрана.
+   */
+  const area = screen.getPrimaryDisplay().workAreaSize
+  const startWidth = Math.min(1240, Math.max(980, area.width - 40))
+  const startHeight = Math.min(980, Math.max(700, area.height - 40))
+
   mainWindow = new BrowserWindow({
-    width: 1240,
-    height: 860,
+    width: startWidth,
+    height: startHeight,
     minWidth: 980,
     minHeight: 640,
     show: false,
@@ -67,11 +90,24 @@ function createWindow(): void {
   // Развёрнуто окно или нет — состояние нужно интерфейсу, чтобы кнопка в
   // верхней полосе показывала «развернуть» или «восстановить». Событие, а не
   // опрос: опрос ради одной иконки — лишняя работа.
+  // Окно больше не живёт от запуска до выхода: уходя в трей, оно
+  // уничтожается по-настоящему (см. обработчик закрытия), и программа
+  // продолжает работать без единого окна — только с иконкой в трее.
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    logger.write('[hub] окно закрыто, программа осталась в трее')
+  })
+
   mainWindow.on('maximize', () => broadcastWindowState(mainWindow))
   mainWindow.on('unmaximize', () => broadcastWindowState(mainWindow))
 
   mainWindow.on('ready-to-show', () => {
     if (!mainWindow) return
+    if (showNow) {
+      mainWindow.show()
+      mainWindow.focus()
+      return
+    }
     // «Запускать свёрнутым» — про окно, а не про способ запуска: человек
     // включил эту настройку и ждёт, что программа поднимется в трей и молча
     // начнёт работать. Раньше окно показывалось всегда, если программа
@@ -94,40 +130,105 @@ function createWindow(): void {
   })
 
   /**
-   * Крестик и всё остальное.
+   * Закрытие окна — крестиком, из списка окон по Alt+Tab, с панели задач.
    *
-   * Крестик нарисован в интерфейсе, поэтому его видно: он приходит вызовом
-   * оттуда. Если «свернуть в трей» включено — окно прячется, программа
-   * остаётся работать; если выключено — крестик закрывает программу совсем
-   * (раньше окно исчезало, а программа оставалась висеть в трее, и выбраться
-   * оттуда можно было только через меню трея).
+   * Пока окно прятали (preventDefault + hide), программа гибла: окно оставалось
+   * живым, только невидимым, и Windows считала, что её просьбу закрыть
+   * проигнорировали. Список окон, панель задач и «Просмотр задач» закрывают
+   * окна через EndTask — он сначала просит вежливо (WM_CLOSE), а если окно на
+   * месте, снимает задачу: процесс убивают без всякого выхода, обходы остаются
+   * работать, а при следующем запуске обход не включается — фильтр WinDivert
+   * занят прежней копией winws. Прятать окно значило подставляться под эту
+   * расправу.
    *
-   * Всё остальное — «Завершить задачу» в панели задач, «Закрыть все окна»,
-   * выход из Windows — приходит как просьба закрыться от системы, мимо
-   * интерфейса. Здесь прятаться в трей нельзя ни в коем случае: Windows
-   * считает задачу исполненной, как только окна не стало, и принудительно
-   * гасить нас не станет. Программа останется жить в трее, а вместе с ней и
-   * компоненты — сколько их потом ни добивай. Поэтому на чужую просьбу
-   * закрываемся по-настоящему.
+   * Поэтому в трей окно уходит по-настоящему: закрытие не перехватываем, окно
+   * уничтожается, и просьба Windows оказывается исполненной — снимать задачу
+   * не за что. Программа при этом не выходит: Electron не закрывается сам по
+   * гибели окна, а `app.quit()` здесь не вызывается. Остаётся иконка в трее,
+   * обходы продолжают работать, а окно создаётся заново, когда человек его
+   * попросит (showWindow).
+   *
+   * Исключение одно — завершение работы Windows или выход пользователя: тут
+   * система ждёт настоящего выхода, и программа закрывается полностью.
    */
   mainWindow.on('close', (event) => {
     if (quitting) return
     const settings = configStore.get().general
-    if (isUiClose() && settings.minimizeToTray) {
-      resetUiClose()
-      event.preventDefault()
-      mainWindow?.hide()
+    if (!sessionEnding && settings.minimizeToTray) {
+      // Ничего не перехватываем: окно должно исчезнуть с экрана по-настоящему,
+      // а программа — остаться работать в трее.
+      logger.write('[hub] закрытие окна: уходим в трей')
       return
     }
-    resetUiClose()
     event.preventDefault()
     quitting = true
+    // Окно убираем с экрана сразу, до остановки компонентов.
+    //
+    // Остановка — не миг: пока гасится winws.exe со всем деревом, проходят
+    // секунды. Раньше окно всё это время оставалось на экране, и Windows
+    // видела живое окно, которое не закрывается: программа объявлялась
+    // «не отвечающей», а следующим шагом ей снимали задачу. Снятая задача —
+    // это гибель программы без всякого выхода: компоненты остаются работать, а
+    // при следующем запуске обход не включается, потому что фильтр WinDivert
+    // занят прежней копией winws. Спрятанное окно такой подсказки не вызывает,
+    // а выход при этом остаётся настоящим: программа закрывается, а не
+    // прячется в трей.
+    mainWindow?.hide()
     void (async () => {
-      // Настройку «останавливать обходы при выходе» уважаем и здесь: кто
-      // просил оставить обход работать без программы, тот его и получит.
-      if (settings.stopComponentsOnQuit) await stopAllSafely()
-      app.quit()
+      try {
+        // Настройку «останавливать обходы при выходе» уважаем и здесь: кто
+        // просил оставить обход работать без программы, тот его и получит.
+        if (settings.stopComponentsOnQuit) await stopAllSafely()
+      } catch (error) {
+        logger.write(`[hub] выход: остановка не удалась — ${String(error)}`)
+      } finally {
+        // Выход — в finally: окно уже спрятано, и если остановка сорвётся,
+        // программа не останется невидимым процессом без всякого выхода.
+        app.quit()
+      }
     })()
+  })
+
+  /**
+   * Завершение работы Windows или выход пользователя.
+   *
+   * В этот момент сворачиваться в трей нельзя: система ждёт, что программа
+   * выйдет, и убьёт её сама, не дождавшись. Выходим сами — так обходы погаснут
+   * по правилам, а не вместе с процессом.
+   */
+  mainWindow.on('session-end', () => {
+    sessionEnding = true
+    if (quitting) return
+    quitting = true
+    void (async () => {
+      try {
+        if (configStore.get().general.stopComponentsOnQuit) await stopAllSafely()
+      } catch (error) {
+        logger.write(`[hub] выход при завершении работы Windows: ${String(error)}`)
+      } finally {
+        app.quit()
+      }
+    })()
+  })
+
+  /**
+   * Открываем окно для закрытия от оболочки Windows.
+   *
+   * Программа работает с правами администратора, а оболочка Windows — список
+   * окон по Alt+Tab, панель задач — обычными. UIPI не пропускает WM_CLOSE от
+   * программы с меньшими правами к окну с большими, поэтому закрыть окно из
+   * списка окон было нельзя: Windows видела живое окно, объявляла программу
+   * «не отвечающей» и снимала задачу. Снятая задача убивает программу сразу,
+   * мимо всякого выхода: компоненты остаются работать, а при следующем запуске
+   * обход не включается — фильтр WinDivert занят прежней копией winws.
+   *
+   * Делаем это один раз, при создании окна, и в фоне: сборка компилируется
+   * секунду-две, а окно должно появиться сразу.
+   */
+  openWindowToShell(mainWindow.getNativeWindowHandle(), (answer) => {
+    // 3 — пропущены и WM_CLOSE, и WM_SYSCOMMAND; всё, что меньше, — в журнал:
+    // по нему видно, дошло ли дело до Windows на этой машине.
+    logger.write(`[hub] окно открыто для оболочки: ${answer || 'ответа нет'}`)
   })
 
   if (devServerUrl) {
@@ -141,6 +242,24 @@ function createWindow(): void {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+}
+
+/**
+ * Показываем окно — создаём заново, если его нет.
+ *
+ * Окно больше не живёт всё время работы программы: уходя в трей, оно
+ * уничтожается, поэтому «показать окно» обычно значит «создать окно снова».
+ * Создание занимает доли секунды — это плата за то, что закрытие окна из
+ * списка окон больше не убивает программу.
+ */
+function showWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+    return
+  }
+  createWindow(true)
 }
 
 /**
@@ -194,11 +313,7 @@ function createTray(): void {
   tray = new Tray(image.resize({ width: 16, height: 16 }))
   tray.setToolTip(APP_DIR_NAME)
   updateTrayMenu()
-  tray.on('double-click', () => {
-    if (!mainWindow) return
-    mainWindow.show()
-    mainWindow.focus()
-  })
+  tray.on('double-click', () => showWindow())
 }
 
 /**
@@ -216,7 +331,7 @@ function updateTrayMenu(): void {
   if (!tray) return
 
   const items: Electron.MenuItemConstructorOptions[] = [
-    { label: 'Показать окно', click: () => { mainWindow?.show(); mainWindow?.focus() } },
+    { label: 'Показать окно', click: () => showWindow() },
     { type: 'separator' }
   ]
 
@@ -299,7 +414,9 @@ async function toggleOne(key: 'zapret' | 'tgws'): Promise<void> {
  * программу через диспетчер задач, и дозорный всё равно погасит компоненты.
  */
 async function stopAllSafely(): Promise<void> {
-  const STOP_TIMEOUT_MS = 20000
+  // Предел есть и у выхода: если компонент не отдаётся, ждём его не бесконечно,
+  // иначе программа висит невидимым процессом и не закрывается вовсе.
+  const STOP_TIMEOUT_MS = 12000
   await Promise.race([
     stopAll(),
     new Promise<void>((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))
@@ -307,8 +424,9 @@ async function stopAllSafely(): Promise<void> {
 }
 
 async function stopAll(): Promise<void> {
-  await zapret?.stop()
-  await tgws?.stop()
+  // Гасим оба компонента вместе, а не по очереди: выход не должен дожидаться,
+  // пока догорит первый, чтобы приняться за второй.
+  await Promise.all([zapret?.stop(), tgws?.stop()])
   broadcastAll()
   updateTrayMenu()
 }
@@ -369,13 +487,19 @@ async function bootstrap(): Promise<void> {
     return
   }
 
-  // автозапуск: восстанавливаем запись в реестре, если настройка включена
   const autostart = configStore.get().autostart
-  if (autostart.enabled) await setAutostart(true, process.execPath)
 
-  createWindow()
+  // Окно создаём, только если его должны увидеть: запускаясь в трей, программа
+  // не держит в памяти лишний интерфейс — а он появляется по первому щелчку по
+  // иконке в трее (showWindow).
+  if (!configStore.get().general.startMinimized && !startedAtLogin()) createWindow()
   createTray()
   watchComponents()
+
+  // Запись автозапуска — не повод задерживать окно. Раньше мы ждали reg.exe
+  // до создания окна, и программа думала лишние доли секунды на ровном месте:
+  // запись в реестр ничему не мешает, а человеку важно увидеть окно.
+  if (autostart.enabled) void setAutostart(true, process.execPath)
 
   // Обходы поднимаются сами, если включён их автозапуск, — независимо от того,
   // запущена программа вместе с Windows или руками. Раньше эта задержка
@@ -468,12 +592,7 @@ process.on('unhandledRejection', (reason) => {
   })
 })
 
-app.on('second-instance', () => {
-  if (!mainWindow) return
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.focus()
-})
+app.on('second-instance', () => showWindow())
 
 app.on('window-all-closed', () => {
   // Трей остаётся живым: закрытое окно не значит, что пора выходить.
@@ -496,8 +615,16 @@ app.on('before-quit', async (event) => {
   if (!config.general.stopComponentsOnQuit) return
   event.preventDefault()
   quitting = true
-  await stopAllSafely()
-  app.quit()
+  // Тот же порядок, что и при закрытии окна: сначала убираем окно, потом
+  // гасим компоненты — иначе Windows успевает объявить программу зависшей.
+  mainWindow?.hide()
+  try {
+    await stopAllSafely()
+  } catch (error) {
+    logger.write(`[hub] выход: остановка не удалась — ${String(error)}`)
+  } finally {
+    app.quit()
+  }
 })
 
 app.on('will-quit', () => {

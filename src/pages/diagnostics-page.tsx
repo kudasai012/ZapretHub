@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Check,
@@ -21,17 +21,11 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
+import { Mark, TargetDialog, type Translate } from '@/components/target-details'
 import { StatusDot } from '@/components/status-dot'
 import { cn, formatMs } from '@/lib/utils'
 import { scoreStrategy, targetOk } from '@shared/scoring'
+import { SEGMENT_CLASS, SLOW_ANSWER_MS, segmentsOf } from '@/lib/probe'
 import { useAction, useDiagnostics, useT } from '@/hooks/use-hub'
 import { toast } from '@/hooks/use-toast'
 
@@ -53,13 +47,8 @@ const DOH_CHOICES: { id: string; name: string }[] = [
   { id: 'adguard', name: 'AdGuard DNS' }
 ]
 
-/** Подписи: ключ и, если нужно, подстановки. */
-type Translate = (key: string, params?: Record<string, string | number>) => string
-
-const SLOW_ANSWER_MS = 300
 
 /** Состояние одного отрезка графика. */
-type SegmentState = 'fast' | 'slow' | 'fail' | 'unknown'
 
 /**
  * Страница диагностики.
@@ -132,9 +121,9 @@ export function DiagnosticsPage({
   }
 
   /** Переключает стратегию в наборе для прогона. */
-  const toggleSelected = (name: string) => {
+  const toggleSelected = useCallback((name: string) => {
     setSelected((prev) => (prev.includes(name) ? prev.filter((item) => item !== name) : [...prev, name]))
-  }
+  }, [])
 
   /** Все стратегии сразу: и выбрать, и снять выбор. */
   const toggleAll = () => {
@@ -143,9 +132,9 @@ export function DiagnosticsPage({
   }
 
   /** Раскрыть или убрать подробности по стратегии. */
-  const toggleDetails = (name: string) => {
+  const toggleDetails = useCallback((name: string) => {
     setOpened((prev) => (prev.includes(name) ? prev.filter((item) => item !== name) : [...prev, name]))
-  }
+  }, [])
 
   /**
    * Порядок стратегии в рейтинге: меньше — лучше.
@@ -425,9 +414,9 @@ export function DiagnosticsPage({
               detailsOpen={opened.includes(name)}
               busy={busy}
               disabled={!zapret.installed}
-              onPick={() => toggleSelected(name)}
-              onTest={() => void testOne(name)}
-              onToggleDetails={() => toggleDetails(name)}
+              onPick={toggleSelected}
+              onTest={testOne}
+              onToggleDetails={toggleDetails}
               t={t}
             />
           ))}
@@ -445,7 +434,14 @@ export function DiagnosticsPage({
  * подробности, проверить заново. Подробности раскрываются под строкой и
  * убираются так же: результат должен быть возможно убрать с глаз.
  */
-function StrategyRow({
+/**
+ * Строка стратегии не перерисовывается из-за чужих результатов.
+ *
+ * Во время прогона результаты приходят по одной стратегии, а без этого
+ * обновлялся весь список: десятки строк с полосками, бейджами и кнопками.
+ * Список длинный, поэтому на слабой машине прогон заметно притормаживал.
+ */
+const StrategyRow = memo(function StrategyRow({
   name,
   index,
   tested,
@@ -471,9 +467,9 @@ function StrategyRow({
   detailsOpen: boolean
   busy: boolean
   disabled: boolean
-  onPick: () => void
-  onTest: () => void
-  onToggleDetails: () => void
+  onPick: (name: string) => void
+  onTest: (name: string) => Promise<void>
+  onToggleDetails: (name: string) => void
   t: (key: string, params?: Record<string, string | number>) => string
 }) {
   const ok = tested ? tested.filter(targetOk).length : 0
@@ -482,11 +478,7 @@ function StrategyRow({
   const pings = (tested ?? []).map((item) => item.pingMs).filter((value): value is number => value !== null)
   const ms = pings.length > 0 ? Math.round(pings.reduce((sum, value) => sum + value, 0) / pings.length) : null
 
-  const segments: SegmentState[] = (tested ?? []).map((item) => {
-    if (!targetOk(item)) return 'fail'
-    if (item.pingMs === null) return 'fast'
-    return item.pingMs > SLOW_ANSWER_MS ? 'slow' : 'fast'
-  })
+  const segments = segmentsOf(tested ?? [])
 
   return (
     <div className={cn('border-b last:border-b-0', current && 'bg-muted/30')}>
@@ -494,7 +486,7 @@ function StrategyRow({
         <Checkbox
           id={`pick-${name}`}
           checked={picked}
-          onCheckedChange={onPick}
+          onCheckedChange={() => onPick(name)}
           aria-label={name}
           className="shrink-0"
         />
@@ -541,13 +533,7 @@ function StrategyRow({
             segments.map((state, position) => (
               <span
                 key={`${name}-${position}`}
-                className={cn(
-                  'h-full flex-1 rounded-sm',
-                  state === 'fast' && 'bg-success',
-                  state === 'slow' && 'bg-warning',
-                  state === 'fail' && 'bg-destructive',
-                  state === 'unknown' && 'bg-muted'
-                )}
+                className={cn('h-full flex-1 rounded-sm', SEGMENT_CLASS[state])}
               />
             ))
           )}
@@ -571,7 +557,7 @@ function StrategyRow({
           variant="ghost"
           size="sm"
           className="h-7 px-2 text-xs"
-          onClick={onToggleDetails}
+          onClick={() => onToggleDetails(name)}
           aria-label={detailsOpen ? t('diag.collapse_hint') : t('diag.expand_hint')}
           title={detailsOpen ? t('diag.collapse_hint') : t('diag.expand_hint')}
         >
@@ -584,7 +570,7 @@ function StrategyRow({
           size="sm"
           className="h-7 text-xs"
           disabled={busy || disabled}
-          onClick={onTest}
+          onClick={() => void onTest(name)}
         >
           {running ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -602,47 +588,9 @@ function StrategyRow({
       ) : null}
     </div>
   )
-}
+})
 
 /** Коды curl, которым есть понятное объяснение. */
-const EXPLAINED_CURL = [6, 7, 28, 35, 52, 54, 56, 60]
-
-/** Что показать про проверку сайта одной строкой. */
-function httpLine(result: DiagnosticsTargetResult, t: Translate): string {
-  if (result.httpOk === null) return t('diag.http_skipped')
-  if (result.httpStatus > 0) return t('diag.http_ok', { code: result.httpStatus })
-  return result.error || t('diag.http_none')
-}
-
-/** Почему проверка сайта вышла такой — простым языком. */
-function httpNote(result: DiagnosticsTargetResult, t: Translate): string {
-  if (result.httpOk === null) return ''
-  if (result.httpOk) return t('diag.note_http_ok')
-  // ответ с кодом — не отказ соединения: сайт живой, просто ответил не тем
-  if (result.httpStatus > 0) return t('diag.explain_status', { code: result.httpStatus })
-  if (result.httpCode > 0) {
-    return EXPLAINED_CURL.includes(result.httpCode)
-      ? t(`diag.explain_${result.httpCode}`)
-      : t('diag.explain_other', { code: result.httpCode })
-  }
-  return t('diag.explain_no_status')
-}
-
-/** Что показать про проверку связи одной строкой. */
-function pingLine(result: DiagnosticsTargetResult, t: Translate): string {
-  if (result.pingOk === null) return t('diag.ping_skipped')
-  if (result.pingOk) return t('diag.ping_ok', { ms: formatMs(result.pingMs) })
-  return t('diag.ping_none')
-}
-
-/**
- * Подробности по целям: раскрываются кнопкой и так же убираются.
- *
- * Строка цели нажимается вся: щелчок открывает разбор одной проверки — что
- * именно ответило, каким кодом и что это значит. Раньше причина отказа
- * помещалась в строку таблицы одной обрезанной надписью, и понять по ней,
- * сайт недоступен или его имя просто не находится, было нельзя.
- */
 function ResultsTable({ results, t }: { results: DiagnosticsTargetResult[]; t: Translate }) {
   const [picked, setPicked] = useState<DiagnosticsTargetResult | null>(null)
 
@@ -718,108 +666,6 @@ function ResultsTable({ results, t }: { results: DiagnosticsTargetResult[]; t: T
  * Показываем обе половины проверки отдельно — сайт и связь — и объясняем
  * отказ словами: «имя не найдено» само по себе ничего не говорит человеку,
  * а «DNS не нашёл имя» объясняет, что обход тут ни при чём.
- */
-function TargetDialog({
-  result,
-  onClose,
-  t
-}: {
-  result: DiagnosticsTargetResult | null
-  onClose: () => void
-  t: Translate
-}) {
-  const note = result ? httpNote(result, t) : ''
-  const pingNote = result && result.pingOk === false ? t('diag.note_ping_fail') : ''
-
-  return (
-    <Dialog open={result !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="data-[state=closed]:animate-none sm:max-w-md">
-        {result ? (
-          <>
-            <DialogHeader>
-              <DialogTitle className="truncate">{result.name}</DialogTitle>
-              <DialogDescription className="break-all font-mono text-xs">
-                {result.address}
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="space-y-3">
-              <div className="flex gap-2.5">
-                <span className="mt-0.5 shrink-0">
-                  <Mark ok={result.httpOk} t={t} />
-                </span>
-                <div className="min-w-0 space-y-1">
-                  <p className="text-xs text-muted-foreground">{t('diag.detail_http')}</p>
-                  <p className="text-sm">{httpLine(result, t)}</p>
-                  {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
-                </div>
-              </div>
-
-              <div className="flex gap-2.5">
-                <span className="mt-0.5 shrink-0">
-                  <Mark ok={result.pingOk} t={t} />
-                </span>
-                <div className="min-w-0 space-y-1">
-                  <p className="text-xs text-muted-foreground">{t('diag.detail_ping')}</p>
-                  <p className="text-sm">{pingLine(result, t)}</p>
-                  {pingNote ? <p className="text-xs text-muted-foreground">{pingNote}</p> : null}
-                </div>
-              </div>
-
-              {result.pingOk ? (
-                <p className="text-xs text-muted-foreground">
-                  {t('diag.detail_avg')}: {formatMs(result.pingMs)}
-                </p>
-              ) : null}
-            </div>
-
-            <DialogFooter>
-              <Button variant="outline" onClick={onClose}>
-                {t('common.close')}
-              </Button>
-            </DialogFooter>
-          </>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/** Галочка, крестик или прочерк — три состояния проверки. */
-function Mark({
-  ok,
-  t
-}: {
-  ok: boolean | null
-  t: (key: string, params?: Record<string, string | number>) => string
-}) {
-  if (ok === null) {
-    return <span className="text-xs text-muted-foreground">—</span>
-  }
-  if (ok) {
-    return (
-      <span title={t('diag.ok')} className="inline-flex text-success">
-        <Check className="h-4 w-4" strokeWidth={2.5} />
-      </span>
-    )
-  }
-  return (
-    <span title={t('diag.no_access')} className="inline-flex text-destructive">
-      <X className="h-4 w-4" strokeWidth={2.5} />
-    </span>
-  )
-}
-
-/**
- * Диагностика системы: проверки из `service.bat` пакета zapret.
- *
- * Зачем отдельным блоком. Прежняя диагностика умела только «отвечают ли сайты»,
- * а причина чаще всего не в стратегии: включён системный прокси, стоит Adguard,
- * в системе осталась служба WinDivert от чужой копии winws, пакет распакован в
- * папку с кириллицей. Человек этого не видит и идёт перезагружать компьютер.
- *
- * Там, где причина чинится кнопкой, кнопка тут же и есть: удалить службу
- * WinDivert, снять чужой обход, включить TCP-метки, почистить кэш Discord.
  */
 function SystemCard({ t }: { t: (key: string, params?: Record<string, string | number>) => string }) {
   const [busy, setBusy] = useState(false)

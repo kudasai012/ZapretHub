@@ -55,7 +55,18 @@ const GROUPS: Record<string, readonly string[]> = {
   zapret: ['snapshot', 'setStrategy', 'setGameFilter', 'setIpsetMode', 'lists', 'readList', 'writeList', 'commandLine', 'removeService'],
   tgws: ['snapshot', 'saveSettings'],
   process: ['start', 'stop', 'startAll', 'stopAll'],
-  diagnostics: ['targets', 'saveTargets', 'checkOne', 'testStrategy', 'checkAll', 'probeAll', 'status', 'runQueue', 'stop'],
+  diagnostics: [
+    'targets',
+    'saveTargets',
+    'checkOne',
+    'testStrategy',
+    'checkAll',
+    'probeCurrent',
+    'probeAll',
+    'status',
+    'runQueue',
+    'stop'
+  ],
   sysdiag: ['run', 'fix'],
   updates: ['check', 'apply'],
   // 'apply' здесь обязателен: без него кнопка «Обновить сейчас» в окне релиза

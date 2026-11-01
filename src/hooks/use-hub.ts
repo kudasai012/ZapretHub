@@ -153,8 +153,12 @@ export function useComponents() {
     const offZapret = window.hub.on('zapret:state', () => void refresh())
     const offTgws = window.hub.on('tgws:state', () => void refresh())
     const offStatus = window.hub.on('component:status', () => void refresh())
-    // страховка на случай, если событие пришло раньше подписки
-    const poll = setInterval(() => void refresh(), POLL_MS)
+    // страховка на случай, если событие пришло раньше подписки.
+    // Пока окно скрыто — программа в трее — не опрашиваем: состояние всё равно
+    // никто не видит, а на возврат фокуса переспрашиваем сразу.
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh()
+    }, POLL_MS)
     // Вернулись в окно — переспрашиваем. Снимок мог сняться в самый первый
     // миг, когда компоненты ещё не нашлись на диске, и «Компонент не
     // установлен» повисло бы до следующего события. Возврат фокуса — самый

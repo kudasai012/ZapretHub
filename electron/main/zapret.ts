@@ -15,7 +15,16 @@ import { findFileDeep, resolveWinws, resolveZapretBinDir, resolveZapretDir } fro
 import { configStore } from './config'
 import { logger } from './logger'
 import { ManagedProcess, STATUS_STOPPED } from './procman'
-import { enableTcpTimestamps, isAdmin, killForeignProcesses, pidsByName, queryService, removeService } from './win32'
+import {
+  enableTcpTimestamps,
+  isAdmin,
+  killForeignProcesses,
+  killOrphanGuardians,
+  pidsByName,
+  queryService,
+  releaseWinDivert,
+  removeService
+} from './win32'
 
 export const SERVICE_NAME = 'zapret'
 
@@ -78,7 +87,7 @@ const WINWS_KNOWN_FAILURES: [string, string][] = [
     'A copy of winws is already running with the same filter',
     'уже запущена другая копия winws с тем же фильтром — выключите zapret (или снимите службу) и повторите'
   ],
-  ['error opening filter', 'фильтр WinDivert занят предыдущей копией winws — подождите пару секунд и повторите'],
+  ['error opening filter', 'фильтр WinDivert занят прежней копией winws'],
   ['could not read', 'winws не смог прочитать свои файлы — переустановите компонент zapret']
 ]
 
@@ -92,6 +101,18 @@ const WINWS_KNOWN_FAILURES: [string, string][] = [
  */
 const BUSY_FILTER = /фильтр WinDivert занят|другая копия winws|error opening filter|same filter/i
 
+/**
+ * Что сказать, если фильтр так и не отдали.
+ *
+ * К этому моменту программа уже убрала всё, что умеет убирать сама: чужие
+ * копии winws, дозорных прежнего запуска и службу драйвера. Если и после
+ * этого фильтр занят, его держит что-то чужое — другой обход или служба,
+ * поставленная service.bat, — и об этом надо сказать прямо, а не советовать
+ * подождать: ожидание тут не помогает.
+ */
+const FILTER_HINT =
+  'Программа убрала всё, что могла. Фильтр держит чужой обход (GoodbyeDPI, служба zapret) — снимите его в Диагностике или перезагрузите компьютер'
+
 /** Сколько ждём, пока ядро отпустит фильтр убитой копии winws. */
 const WINDIVERT_SETTLE_MS = 1200
 
@@ -100,6 +121,9 @@ const FOREIGN_KILL_SETTLE_MS = 900
 
 /** Сколько раз пробуем запустить winws, если фильтр ещё занят. */
 const START_ATTEMPTS = 4
+
+/** На какой попытке снимаем службу драйвера, если процессы уже убраны. */
+const DRIVER_RELEASE_ATTEMPT = 2
 
 /** Человеческая причина провала по тому, что написал сам winws. */
 export function winwsFailureReason(output: string[]): string {
@@ -511,12 +535,24 @@ export class ZapretComponent {
   }
 
   /** Гасит winws.exe, запущенный не Zapret Hub. */
+  /**
+   * Убирает всё, что помешает новому winws.
+   *
+   * Кроме чужих копий winws это ещё и дозорные прежнего запуска программы.
+   * Дозорный живёт дольше своей программы и гасит winws по имени образа: если
+   * программу сняли задачей, он ещё какое-то время добивает чужое — и убивает
+   * наш свежий запуск ровно в тот миг, когда тот открывает фильтр.
+   */
   private async killForeign(): Promise<number[]> {
+    const orphans = await killOrphanGuardians('zapret')
+    if (orphans.length > 0) {
+      this.log(`снят дозорный прежнего запуска (PID ${orphans.join(', ')}) — иначе он гасит наш winws`)
+    }
     const killed = await killForeignProcesses('winws', this.ownPids())
     if (killed.length > 0) {
       this.log(`остановлен сторонний winws.exe (PID ${killed.join(', ')}) — запускаю свой`)
-      await sleep(FOREIGN_KILL_SETTLE_MS)
     }
+    if (orphans.length > 0 || killed.length > 0) await sleep(FOREIGN_KILL_SETTLE_MS)
     return killed
   }
 
@@ -616,7 +652,8 @@ export class ZapretComponent {
     // ним держится ещё какой-то миг. Раньше программа показывала эту ошибку и
     // сдавалась, и человек шёл перезагружать компьютер. Теперь пробуем снова:
     // почти всегда хватает второй попытки, и обход включается сам.
-    for (let attempt = 1; ; attempt += 1) {
+    let released = false
+    for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
       const started = await this.spawnWinws(parsed)
       if (started.ok) {
         this.reason = ''
@@ -624,13 +661,36 @@ export class ZapretComponent {
       }
       this.reason = started.reason
       this.log(`не запустился: ${started.reason}`)
-      if (attempt >= START_ATTEMPTS || !BUSY_FILTER.test(started.reason)) {
-        return { ok: false, reason: started.reason }
-      }
-      this.log(`фильтр WinDivert ещё занят — попытка ${attempt} из ${START_ATTEMPTS}, повторяю`)
+      if (!BUSY_FILTER.test(started.reason)) return { ok: false, reason: started.reason }
+      if (attempt >= START_ATTEMPTS) break
+
+      // Сначала убираем владельцев фильтра: чужие копии winws и дозорных
+      // прежнего запуска. Это дешёвое действие, и в половине случаев его
+      // хватает — ядро отпускает фильтр само, как только убит последний, кто
+      // его держал.
       await this.killForeign()
+
+      if (released || attempt < DRIVER_RELEASE_ATTEMPT) {
+        this.log(`фильтр WinDivert ещё занят — попытка ${attempt} из ${START_ATTEMPTS}, повторяю`)
+        await sleep(WINDIVERT_SETTLE_MS)
+        continue
+      }
+
+      // Процессов-владельцев нет, а фильтр занят — значит, его держит служба
+      // драйвера от прежней копии. Снимаем её и пробуем снова: раньше на этом
+      // месте программа сдавалась и отправляла человека перезагружать
+      // компьютер, хотя всё чинилось одной командой.
+      released = true
+      this.log('фильтр WinDivert занят службой драйвера — снимаю её')
+      const freed = await releaseWinDivert(this.ownPids(), { stopTimeoutMs: 4000, settleMs: 3000 })
+      this.log(
+        freed.freed
+          ? `фильтр WinDivert освобождён (снято копий winws: ${freed.killed.length})`
+          : `фильтр WinDivert не отдали: служба ${freed.state}`
+      )
       await sleep(WINDIVERT_SETTLE_MS)
     }
+    return { ok: false, reason: `${this.reason}. ${FILTER_HINT}` }
   }
 
   async stop(): Promise<{ ok: boolean; reason: string }> {

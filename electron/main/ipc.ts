@@ -17,7 +17,6 @@ import type {
   MainEvents,
   UpdateInfo
 } from '@shared/contract'
-import { markUiClose } from './close-intent'
 import { configStore, DEFAULT_DIAG_TARGETS } from './config'
 import { logger } from './logger'
 import { openInFileManager, uninstallerPath } from './paths'
@@ -335,6 +334,30 @@ export function registerIpc(): void {
     return { strategy, status: 'done' as const, results: finalResults, startedAt: Date.now(), finishedAt: Date.now() }
   })
 
+  /**
+   * Проверка стратегии, выбранной сейчас: для мини-панели на главной.
+   *
+   * Обход работает — проверяем как есть, ничего не трогая. Обход стоит —
+   * поднимаем его на время проверки и возвращаем как было: проверить
+   * стратегию, которой ничего не пропущено, нельзя.
+   */
+  ipcMain.handle('diagnostics:probeCurrent', async () => {
+    if (services.zapret.isRunning()) {
+      return { ok: true, reason: '', results: await checkAll() }
+    }
+    const started = await services.zapret.start()
+    if (!started.ok) {
+      return {
+        ok: false,
+        reason: started.reason || 'обход не запустился',
+        results: []
+      }
+    }
+    const results = await checkAll()
+    await services.zapret.stop()
+    return { ok: true, reason: '', results }
+  })
+
   /** Идёт ли прогон прямо сейчас: по этому ответу экран не запускает второй. */
   ipcMain.handle('diagnostics:status', () => ({
     busy: sweep.busy,
@@ -554,13 +577,10 @@ export function registerIpc(): void {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
   })
   ipcMain.handle('window:close', (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender)
-    if (!window) return
-    // Крестик нарисован в интерфейсе, и это единственный случай, когда
-    // закрытие идет от человека, а не от системы. Помечаем, чтобы обработчик
-    // закрытия окна не спутал его с «Завершить задачу».
-    markUiClose()
-    window.close()
+    // Крестик нарисован в интерфейсе, но закрытие окна всегда значит одно и то
+    // же — что бы его ни попросило: крестик, список окон по Alt+Tab или
+    // панель задач. Разбирается с этим обработчик закрытия окна.
+    BrowserWindow.fromWebContents(event.sender)?.close()
   })
   ipcMain.handle('window:isMaximized', (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
@@ -603,17 +623,14 @@ export function registerIpc(): void {
    * у запущенной из исходников деинсталлятора нет, и человеку об этом говорят
    * прямо, а не подсовывают кнопку, которая ничего не делает.
    */
-  ipcMain.handle('app:uninstallInfo', () => {
-    const target = uninstallerPath()
-    return {
-      path: target ?? '',
-      reason: target ? '' : 'деинсталлятор не найден'
-    }
-  })
+  // Причину отдаём вместе с ответом: когда кнопка «Удалить программу» серая,
+  // человек должен понимать почему, а не гадать, сломалось или так надо.
+  ipcMain.handle('app:uninstallInfo', () => uninstallerPath())
 
   ipcMain.handle('app:uninstall', async () => {
-    const target = uninstallerPath()
-    if (!target) return { ok: false, reason: 'деинсталлятор не найден' }
+    const found = uninstallerPath()
+    const target = found.path
+    if (!target) return { ok: false, reason: found.reason || 'деинсталлятор не найден' }
     logger.write('[hub] удаление программы: ' + target)
     try {
       // Отсоединённо: деинсталлятор живёт своей жизнью, программа уже уходит.

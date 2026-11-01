@@ -24,6 +24,7 @@ import {
   pidsByName,
   powershell,
   queryService,
+  releaseWinDivert,
   removeService,
   run,
   tcpTimestampsOpt,
@@ -323,16 +324,21 @@ export async function collectFacts(): Promise<SysFacts> {
     '-ErrorAction SilentlyContinue | Get-ItemProperty -ErrorAction SilentlyContinue | ' +
     'Where-Object { $_.DohFlags -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count'
 
-  const [services, bfe, winDivert, zapretService, timestamps, adguardPids, winwsPids, doh] = await Promise.all([
-    run('sc', ['query', 'type=', 'service', 'state=', 'all'], 25000),
-    queryService('BFE'),
-    queryService('WinDivert'),
-    queryService('zapret'),
-    tcpTimestampsOpt(),
-    pidsByName('AdguardSvc'),
-    pidsByName('winws'),
-    powershell(dohScript, 25000)
-  ])
+  const [services, bfe, winDivert, winDivert14, zapretService, timestamps, adguardPids, winwsPids, doh] =
+    await Promise.all([
+      run('sc', ['query', 'type=', 'service', 'state=', 'all'], 25000),
+      queryService('BFE'),
+      queryService('WinDivert'),
+      // В свежих версиях пакета драйвер ставится службой WinDivert14. Если
+      // смотреть только на WinDivert, проверка пропускает ровно тот случай,
+      // из-за которого её и делали: фильтр занят, а проверка молчит «ок».
+      queryService('WinDivert14'),
+      queryService('zapret'),
+      tcpTimestampsOpt(),
+      pidsByName('AdguardSvc'),
+      pidsByName('winws'),
+      powershell(dohScript, 25000)
+    ])
 
   let hosts = ''
   try {
@@ -354,7 +360,8 @@ export async function collectFacts(): Promise<SysFacts> {
   return {
     services: services.stdout,
     bfe,
-    winDivert,
+    // Держит фильтр та из двух служб, которая ещё жива.
+    winDivert: busy(winDivert) ? winDivert : winDivert14,
     zapretService,
     proxyEnable: await regQuery('ProxyEnable', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'),
     proxyServer: await regQuery('ProxyServer', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'),
@@ -375,35 +382,72 @@ export async function runSystemChecks(): Promise<SysCheck[]> {
   return evaluateFacts(await collectFacts())
 }
 
-/** Останавливает и удаляет службу WinDivert — она и держит фильтр. */
+/**
+ * Освобождает фильтр WinDivert: останавливает и удаляет службу драйвера.
+ *
+ * Раньше здесь просто гасилась запись службы, и программа рапортовала
+ * «WinDivert удалён», потому что записи и правда больше не было. Но загруженный
+ * драйвер от этого никуда не девался: он оставался в ядре и продолжал держать
+ * фильтр, из-за чего обход не запускался ровно с той же ошибкой. Человек видел
+ * «Готово» и ничего не произошло.
+ *
+ * Теперь порядок такой же, как при запуске обхода: сначала гасим копии winws
+ * (они держат открытые описатели драйвера), потом снимаем службу, потом ждём,
+ * пока фильтр и правда отдадут. И отвечаем по факту, а не по команде: если
+ * фильтр не отдали — так и говорим.
+ */
 export async function fixWinDivert(): Promise<{ ok: boolean; message: string }> {
-  for (const name of ['WinDivert', 'WinDivert14']) {
-    await run('net', ['stop', name], 15000)
-    await run('sc', ['delete', name], 15000)
+  const freed = await releaseWinDivert(new Set<number>(), { stopTimeoutMs: 15000, settleMs: 8000 })
+  if (!freed.freed) {
+    return {
+      ok: false,
+      message: `фильтр WinDivert не отдают: служба ${freed.state}. Закройте программы, которые его держат, или перезагрузите компьютер`
+    }
   }
-  const left = await queryService('WinDivert')
-  if (left === 'NOT_FOUND') return { ok: true, message: 'WinDivert удалён' }
-  return { ok: false, message: `служба WinDivert всё ещё на месте (${left})` }
+  return {
+    ok: true,
+    message:
+      freed.killed.length > 0
+        ? `фильтр свободен: остановлено копий winws — ${freed.killed.length}, служба драйвера снята`
+        : 'фильтр свободен: служба драйвера снята'
+  }
 }
 
 /** Удаляет службы чужих обходов: GoodbyeDPI, discordfix_zapret, winws1, winws2. */
 export async function fixConflicts(): Promise<{ ok: boolean; message: string }> {
-  const facts = await collectFacts()
-  const found = CONFLICT_SERVICES.filter((name) => serviceNamed(facts.services, name))
+  const before = await scQuery()
+  const found = CONFLICT_SERVICES.filter((name) => serviceNamed(before.stdout, name))
   if (found.length === 0) return { ok: true, message: 'конфликтующих служб нет' }
   for (const name of found) {
     await run('net', ['stop', name], 15000)
+    await run('sc', ['stop', name], 15000)
     await run('sc', ['delete', name], 15000)
   }
-  return { ok: true, message: `удалено: ${found.join(', ')}` }
+  // Переспрашиваем систему, а не верим коду удаления: `sc delete` отвечает
+  // успехом и тогда, когда служба только помечена к удалению и продолжает
+  // работать до перезагрузки.
+  const after = await scQuery()
+  const left = CONFLICT_SERVICES.filter((name) => serviceNamed(after.stdout, name))
+  return left.length === 0
+    ? { ok: true, message: `удалено: ${found.join(', ')}` }
+    : { ok: false, message: `не удалились: ${left.join(', ')} (службы снимутся после перезагрузки)` }
+}
+
+/** Список служб Windows — один и тот же запрос и для проверки, и для починки. */
+async function scQuery(): Promise<{ code: number; stdout: string; stderr: string }> {
+  return run('sc', ['query', 'type=', 'service', 'state=', 'all'], 25000)
 }
 
 /** Удаляет службу «zapret», поставленную service.bat. */
 export async function fixZapretService(): Promise<{ ok: boolean; message: string }> {
-  const ok = await removeService('zapret')
-  return ok
+  await removeService('zapret')
+  // Состояние читаем заново: удаление отвечает успехом и тогда, когда служба
+  // лишь помечена к удалению, а работает до перезагрузки.
+  const state = await queryService('zapret')
+  const gone = state === 'NOT_FOUND' || state === 'STOPPED'
+  return gone
     ? { ok: true, message: 'служба «zapret» удалена' }
-    : { ok: false, message: 'не удалось удалить службу «zapret»' }
+    : { ok: false, message: `служба «zapret» на месте (${state}) — она снимется после перезагрузки` }
 }
 
 /** Чистит кэш Discord: помогает, когда Discord не открывается при живом обходе. */
@@ -431,6 +475,16 @@ export async function fixDiscordCache(): Promise<{ ok: boolean; message: string 
       } catch {
         /* папка занята — покажем, что успели */
       }
+    }
+  }
+  // «Готово» говорим только тогда, когда что-то и правда сделано. Раньше
+  // кнопка рапортовала успех всегда — даже если Discord не был запущен, а папок
+  // кэша не было вовсе: человек нажимал «починить», видел «Готово» и не видел
+  // никакой перемены.
+  if (killed.length === 0 && cleaned === 0) {
+    return {
+      ok: false,
+      message: 'чистить нечего: Discord не запущен, папки кэша пусты'
     }
   }
   return {

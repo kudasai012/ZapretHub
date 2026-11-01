@@ -414,6 +414,51 @@ function copyRecursive(source: string, destination: string): void {
 }
 
 /**
+ * Сторож, который поднимает программу после обновления.
+ *
+ * Ключа «--force-run» мало: установщики прежних сборок его не знают и молча
+ * пропускают, а тихая установка сама программу не запускает. Сторож живёт
+ * отдельным процессом: он дожидается конца установщика — наша программа к
+ * этому времени уже закрыта — и поднимает её, если та не поднялась сама.
+ *
+ * Текст только латиницей: установщик и папка программы могут лежать там, где
+ * кириллица в командных файлах читается криво.
+ */
+function writeRelaunchScript(installerName: string): void {
+  if (process.platform !== 'win32') return
+  try {
+    const appPath = app.getPath('exe')
+    const appName = path.basename(appPath)
+    const lines = [
+      '@echo off',
+      'rem Zapret Hub: start the program after the update',
+      ':wait',
+      `tasklist /FI "IMAGENAME eq ${installerName}" 2>nul | find /I "${installerName}" >nul`,
+      'if not errorlevel 1 (',
+      '  timeout /t 1 /nobreak >nul',
+      '  goto wait',
+      ')',
+      `tasklist /FI "IMAGENAME eq ${appName}" 2>nul | find /I "${appName}" >nul`,
+      'if errorlevel 1 start "" "' + appPath + '"',
+      'del "%~f0" >nul 2>&1',
+      ''
+    ]
+    const script = path.join(os.tmpdir(), 'zaprethub-relaunch.cmd')
+    fs.writeFileSync(script, lines.join('\r\n'), 'ascii')
+    const { spawn } = require('node:child_process') as typeof import('node:child_process')
+    spawn('cmd.exe', ['/c', script], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    }).unref()
+    logger.write('[hub] после обновления программу поднимет: ' + script)
+  } catch (error) {
+    // Сторож — страховка, не основа: без него установщик поднимет программу сам
+    logger.write('[hub] сторож перезапуска не записался: ' + String(error))
+  }
+}
+
+/**
  * Обновление самой программы.
  *
  * exe занят, пока программа работает, поэтому скачиваем установщик,
@@ -439,18 +484,24 @@ export async function applyAppUpdate(): Promise<{ ok: boolean; message: string }
     )
     const { spawn } = require('node:child_process') as typeof import('node:child_process')
     // Ключ тишины — «/S». Установщик собирает NSIS, а не Inno Setup, и ключи
-    // Inno (/VERYSILENT, /SUPPRESSMSGBOXES, /NORESTART) он не понимает: раньше
+    // Inno (/VERYSILENT, /SUPPRESSMSGSBOXES, /NORESTART) он не понимает: раньше
     // здесь стояли они, и вместо тихой установки человеку открывался мастер
     // установки с кнопками «Далее», хотя программа обещает «закроется и
     // запустит его». NSIS неизвестные ключи просто игнорирует, поэтому
     // молчание выглядело работающим, а на деле было нет.
-    spawn(target, ['/S'], {
+    //
+    // «--force-run» — просьба поднять программу после тихой установки: без
+    // неё NSIS считает, что тихая установка ничего не запускает, и человек
+    // остаётся перед пустым рабочим столом.
+    const installerName = path.basename(target)
+    writeRelaunchScript(installerName)
+    spawn(target, ['/S', '--force-run'], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     }).unref()
     say(100, 'done', 'установщик запущен')
-    return { ok: true, message: 'установщик запущен, программа закроется' }
+    return { ok: true, message: 'установщик запущен, программа закроется и поднимется сама' }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     say(0, 'error', message)

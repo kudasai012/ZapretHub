@@ -19,6 +19,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { StatusDot, statusTone } from '@/components/status-dot'
+import { StrategyProbe } from '@/components/strategy-probe'
 import { cn } from '@/lib/utils'
 import { CIRCLE_CLASS, isTransitioning, stateText, verdictOf } from '@/lib/verdict'
 import { useT } from '@/hooks/use-hub'
@@ -161,7 +162,7 @@ export function HomePage({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">{t('dash.title')}</h1>
         <p className="text-sm text-muted-foreground">{t('dash.subtitle')}</p>
@@ -186,7 +187,7 @@ export function HomePage({
             }
           }}
           className={cn(
-            'flex cursor-pointer flex-col gap-5 p-5 text-left transition-colors',
+            'flex cursor-pointer flex-col gap-4 p-4 text-left transition-colors',
             'hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
             'sm:flex-row sm:items-center',
             busy && 'cursor-default'
@@ -194,7 +195,7 @@ export function HomePage({
         >
           <span
             className={cn(
-              'flex h-16 w-16 shrink-0 items-center justify-center rounded-full',
+              'flex h-14 w-14 shrink-0 items-center justify-center rounded-full',
               CIRCLE_CLASS[verdict.tone]
             )}
           >
@@ -289,6 +290,14 @@ export function HomePage({
             {t('diag.title')}
           </Button>
         </div>
+
+        {/* Проверка выбранной стратегии — здесь, а не только в Диагностике:
+            человек хочет знать, работает ли то, что у него включено сейчас. */}
+        <StrategyProbe
+          strategy={config.zapret.strategy || ''}
+          bypassRunning={zapret?.status === 'running'}
+          t={t}
+        />
       </section>
     </div>
   )
@@ -321,7 +330,7 @@ function BypassCard({
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center gap-3 space-y-0 pb-3">
+      <CardHeader className="flex-row items-center gap-3 space-y-0 pb-2 pt-4">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-muted/40">
           {isZapret ? <Zap className="h-4 w-4" /> : <Globe className="h-4 w-4" />}
         </span>
@@ -344,7 +353,7 @@ function BypassCard({
         </Button>
       </CardHeader>
 
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-2.5 pb-4">
         <div className="flex items-center gap-2">
           <StatusDot tone={statusTone(snapshot.status)} />
           {/* Состояние словами. У неустановленного компонента вместо слов —

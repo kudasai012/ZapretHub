@@ -201,6 +201,104 @@ export async function killForeignProcesses(image: string, ownPids: Set<number>):
   return killed
 }
 
+/**
+ * Имена служб драйвера WinDivert.
+ *
+ * В свежих версиях пакета драйвер ставится службой WinDivert14, а не
+ * WinDivert. Снимать надо обе: оставшаяся вторая продолжает держать фильтр,
+ * и обход не включается ровно с той же ошибкой, из-за которой её и чинили.
+ */
+export const WINDIVERT_SERVICES = ['WinDivert', 'WinDivert14']
+
+/** Держит ли служба драйвера фильтр: остановленная и удалённая — не держит. */
+export function holdsFilter(state: ServiceState): boolean {
+  return state !== 'NOT_FOUND' && state !== 'STOPPED'
+}
+
+/**
+ * Снимает дозорных, оставшихся от прежних запусков программы.
+ *
+ * Дозорный — отдельный PowerShell, который гасит компонент, едва программа
+ * исчезла. Он живёт дольше своей программы: если программу сняли задачей,
+ * дозорный ещё какое-то время ищет, кого ему погасить, и находит по имени
+ * образа — в том числе ту копию winws.exe, которую только что подняла новая
+ * программа. Отсюда и берётся «фильтр WinDivert занят» на свежем запуске:
+ * winws стартует, чужой дозорный его убивает, фильтр остаётся полуоткрытым.
+ *
+ * Своих дозорных не трогаем: они берегут работающий сейчас обход.
+ */
+export async function killOrphanGuardians(key: string): Promise<number[]> {
+  if (!IS_WINDOWS) return []
+  const needle = `ZapretHub.Guardian.${key}.`
+  const self = `.${process.pid}.ps1`
+  const ps =
+    "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | " +
+    `Where-Object { $_.CommandLine -like '*${needle}*' -and $_.CommandLine -notlike '*${self}*' } | ` +
+    'Select-Object -ExpandProperty ProcessId'
+  const found = await powershell(ps, 15000)
+  const killed: number[] = []
+  for (const pid of readPids(found.stdout)) {
+    const result = await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
+    if (result.code === 0) killed.push(pid)
+  }
+  return killed
+}
+
+/**
+ * Освобождает фильтр WinDivert, занятый прежней копией winws.
+ *
+ * Порядок обратен тому, что напрашивается. Сначала гасим все копии winws:
+ * именно они держат открытые описатели драйвера. Потом снимаем службу
+ * драйвера — и только потом ждём, пока ядро отдаст фильтр: оно делает это не
+ * в ту же миллисекунду, когда убит последний владелец.
+ *
+ * Удаление службы само по себе ничего не меняет: запись уходит из реестра, а
+ * загруженный драйвер остаётся в ядре и фильтр не отдаёт. Раньше программа
+ * делала ровно это и честно рапортовала «WinDivert удалён», хотя в системе не
+ * менялось ничего — человек нажимал «починить», видел «Готово» и ту же самую
+ * ошибку при запуске.
+ */
+export async function releaseWinDivert(
+  ownPids: Set<number> = new Set<number>(),
+  options: { stopTimeoutMs?: number; settleMs?: number } = {}
+): Promise<{ freed: boolean; killed: number[]; state: ServiceState }> {
+  const stopTimeout = options.stopTimeoutMs ?? 8000
+  const settle = options.settleMs ?? 5000
+  if (!IS_WINDOWS) return { freed: true, killed: [], state: 'NOT_FOUND' }
+  const killed: number[] = []
+
+  // 1. Чужие копии winws.exe: они и есть владельцы фильтра.
+  const deadline = Date.now() + settle
+  for (;;) {
+    const foreign = (await pidsByName('winws')).filter((pid) => !ownPids.has(pid))
+    if (foreign.length === 0 || Date.now() >= deadline) break
+    for (const pid of foreign) {
+      const result = await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
+      if (result.code === 0) killed.push(pid)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  }
+
+  // 2. Служба драйвера: без этого старый драйвер остаётся в ядре даже тогда,
+  //    когда процессов-владельцев уже нет.
+  for (const name of WINDIVERT_SERVICES) {
+    await run('net', ['stop', name], stopTimeout)
+    await run('sc', ['stop', name], stopTimeout)
+    await run('sc', ['delete', name], stopTimeout)
+  }
+
+  // 3. Ждём, пока служба действительно отпустит фильтр, а не обещает это.
+  let state: ServiceState = 'NOT_FOUND'
+  const until = Date.now() + settle
+  for (;;) {
+    const states = await Promise.all(WINDIVERT_SERVICES.map((name) => queryService(name)))
+    state = states.find(holdsFilter) ?? 'NOT_FOUND'
+    if (!holdsFilter(state) || Date.now() >= until) break
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  return { freed: !holdsFilter(state), killed, state }
+}
+
 /** Включает TCP-метки времени — без них часть стратегий не работает. */
 const TCP_PARAM_KEY = 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters'
 
@@ -696,6 +794,141 @@ export function warmUpJobHelper(): void {
   }
 }
 
+/**
+ * Помощник окна: маленькая сборка на C#, снимающая с окна запрет UIPI.
+ *
+ * Программа всегда запускается от имени администратора — без этого winws.exe
+ * не работает вовсе. А оболочка Windows — список окон по Alt+Tab, панель
+ * задач, «Просмотр задач» — работает обычными правами. Между разными уровнями
+ * прав стоит UIPI: сообщения от программы с меньшими правами окну с большими
+ * не доставляются, и WM_CLOSE в их числе. Поэтому «Закрыть» из списка окон до
+ * программы не доходило: Windows видела живое окно, объявляла программу
+ * «не отвечающей» и снимала задачу. Снятая задача — это гибель сразу, без
+ * всякого выхода: компоненты остаются работать, а при следующем запуске обход
+ * не включается, потому что фильтр WinDivert занят прежней копией winws.
+ *
+ * ChangeWindowMessageFilterEx открывает окну ровно два сообщения — «закрыть» и
+ * команду окна, — и оболочка снова может закрыть программу по-человечески.
+ */
+export const WINDOW_HELPER_VERSION = 'v1'
+
+export const WINDOW_HELPER_SOURCE = `using System;
+using System.Runtime.InteropServices;
+
+public class HubWindow
+{
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr changeInfo);
+
+    private const uint WM_CLOSE = 0x0010;
+    private const uint WM_SYSCOMMAND = 0x0112;
+    private const uint MSGFLT_ALLOW = 1;
+
+    /**
+     * Открывает окно для закрытия от оболочки Windows.
+     *
+     * Возвращает, что удалось: 1 — пропущен WM_CLOSE, 2 — WM_SYSCOMMAND.
+     */
+    public static int Open(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return 0;
+        int done = 0;
+        if (ChangeWindowMessageFilterEx(hWnd, WM_CLOSE, MSGFLT_ALLOW, IntPtr.Zero)) done += 1;
+        if (ChangeWindowMessageFilterEx(hWnd, WM_SYSCOMMAND, MSGFLT_ALLOW, IntPtr.Zero)) done += 2;
+        return done;
+    }
+}
+`
+
+/** Путь к исходнику помощника окна. */
+export function windowHelperSourcePath(): string {
+  return path.join(os.tmpdir(), `ZapretHub.HubWindow.${WINDOW_HELPER_VERSION}.cs`)
+}
+
+/** Путь к собранному помощнику окна. */
+export function windowHelperAssemblyPath(): string {
+  return path.join(os.tmpdir(), `ZapretHub.HubWindow.${WINDOW_HELPER_VERSION}.dll`)
+}
+
+/** Кладёт исходник помощника окна в temp. Пустая строка — не записалось. */
+export function writeWindowHelper(): string {
+  const target = windowHelperSourcePath()
+  try {
+    fs.writeFileSync(target, WINDOW_HELPER_SOURCE, 'utf8')
+    return target
+  } catch {
+    return ''
+  }
+}
+
+/** Номер окна Windows строкой: его и подставляем в сценарий. */
+export function windowHandleText(handle: Buffer): string {
+  if (handle.length >= 8) return handle.readBigUInt64LE(0).toString(16)
+  if (handle.length >= 4) return String(handle.readUInt32LE(0))
+  return ''
+}
+
+/**
+ * Открывает окно для закрытия от оболочки Windows.
+ *
+ * Делается один раз, при создании окна, и в фоне: сборка на C# компилируется
+ * секунду-две, а окно должно появиться сразу. Неудача здесь не страшна —
+ * программа просто останется такой, какой была, — но ответ помощника уходит в
+ * журнал: по нему видно, дошло ли дело до Windows.
+ */
+export function openWindowToShell(
+  handle: Buffer,
+  onDone?: (text: string) => void
+): ChildProcess | null {
+  if (!IS_WINDOWS) return null
+  const id = windowHandleText(handle)
+  if (!id) return null
+  const source = writeWindowHelper()
+  if (!source) return null
+  const assembly = windowHelperAssemblyPath()
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$cs='${source}'`,
+    `$dll='${assembly}'`,
+    `if(-not (Test-Path -LiteralPath $dll)){ Add-Type -LiteralPath $cs -OutputAssembly $dll }`,
+    `if(Test-Path -LiteralPath $dll){ Add-Type -LiteralPath $dll -ErrorAction Stop }`,
+    'else { Add-Type -LiteralPath $cs -ErrorAction Stop }',
+    `$hwnd = [IntPtr]::new([Convert]::ToInt64('${id}', 16))`,
+    'Write-Output ([HubWindow]::Open($hwnd))'
+  ].join('\n')
+
+  let file = ''
+  try {
+    file = path.join(os.tmpdir(), `ZapretHub.Window.${process.pid}.ps1`)
+    // BOM: PowerShell 5.1 без метки читает файл в системной кодировке.
+    fs.writeFileSync(file, `\ufeff${script}`, 'utf8')
+    cleanupTempFiles([file])
+  } catch {
+    return null
+  }
+
+  try {
+    const child = spawn('powershell.exe', [...PS_FILE_ARGS, file], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    child.unref()
+    let answer = ''
+    child.stdout?.on('data', (chunk) => {
+      answer += String(chunk)
+    })
+    child.stderr?.on('data', (chunk) => {
+      answer += String(chunk)
+    })
+    child.on('close', () => {
+      onDone?.(answer.trim())
+    })
+    return child
+  } catch {
+    return null
+  }
+}
+
 /** Путь к метке «компонент отпущен, гасить не надо». */
 export function releaseFlagPath(key: string): string {
   return path.join(os.tmpdir(), `ZapretHub.Release.${key}.${process.pid}.flag`)
@@ -739,7 +972,7 @@ export function clearReleaseFlag(key: string): void {
 function cleanupTempFiles(keep: string[]): void {
   try {
     for (const name of fs.readdirSync(os.tmpdir())) {
-      if (!/^ZapretHub\.(Guardian\..*\.ps1|Release\..*\.flag)$/.test(name)) continue
+      if (!/^ZapretHub\.(Guardian\..*\.ps1|Window\..*\.ps1|Release\..*\.flag)$/.test(name)) continue
       const full = path.join(os.tmpdir(), name)
       if (keep.includes(full)) continue
       try {

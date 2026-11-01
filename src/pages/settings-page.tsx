@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Download, ExternalLink, FolderOpen, RefreshCw, Trash2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  Download,
+  ExternalLink,
+  FolderOpen,
+  RefreshCw,
+  Trash2
+} from 'lucide-react'
 import type { AppConfig, ComponentKey, HomeState, UpdateInfo } from '@shared/contract'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -50,6 +57,7 @@ export function SettingsPage({
   const [appVersion, setAppVersion] = useState('')
   /** Удаление программы: есть ли деинсталлятор и открыт ли вопрос. */
   const [canUninstall, setCanUninstall] = useState(false)
+  const [uninstallWhy, setUninstallWhy] = useState('')
   const [askUninstall, setAskUninstall] = useState(false)
   // секунды, которые осталось ждать: удаление необратимо, кнопка открывается
   // не сразу, чтобы решение не принималось одним щелчком
@@ -60,7 +68,12 @@ export function SettingsPage({
   }, [])
 
   useEffect(() => {
-    void window.hub.app.uninstallInfo().then((info) => setCanUninstall(info.path !== ''))
+    void window.hub.app.uninstallInfo().then((info) => {
+      setCanUninstall(info.path !== '')
+      // серая кнопка обязана объяснять себя: «не найден» без подробностей
+      // заставляет человека искать поломку там, где её нет
+      setUninstallWhy(info.reason || '')
+    })
   }, [])
 
   useEffect(() => {
@@ -225,41 +238,6 @@ export function SettingsPage({
       {/* Обновления */}
       <UpdatesCard home={home} appVersion={appVersion} t={t} action={action} onShowRelease={onShowRelease} />
 
-      {/* Расположение */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">{t('set.paths')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void action(window.hub.shell.openPath('components'), {})}
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              {t('set.components_dir')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void action(window.hub.shell.openPath('logs'), {})}
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              {t('set.logs_dir')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void window.hub.shell.openUrl(REPO_URL)}
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-              GitHub
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* О программе — последним: это сведения, а не то, чем пользуются каждый день. */}
       <Card>
         <CardHeader>
@@ -288,7 +266,7 @@ export function SettingsPage({
               className="shrink-0"
               disabled={!canUninstall}
               onClick={() => setAskUninstall(true)}
-              title={canUninstall ? t('set.uninstall_hint') : t('set.uninstall_missing')}
+              title={canUninstall ? t('set.uninstall_hint') : uninstallWhy || t('set.uninstall_missing')}
             >
               <Trash2 className="h-3.5 w-3.5" />
               {t('set.uninstall')}
@@ -309,10 +287,30 @@ export function SettingsPage({
             </div>
           </div>
 
-          <Button variant="outline" size="sm" onClick={() => void window.hub.shell.openUrl(REPO_URL)}>
-            <ExternalLink className="h-3.5 w-3.5" />
-            {t('set.open_repo')}
-          </Button>
+          {/* Всё, что можно открыть, — в одном ряду: отдельная панель ради
+              трёх кнопок занимала место и не говорила ничего нового. */}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onClick={() => void window.hub.shell.openUrl(REPO_URL)}>
+              <ExternalLink className="h-3.5 w-3.5" />
+              {t('set.open_repo')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void action(window.hub.shell.openPath('components'), {})}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              {t('set.components_dir')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void action(window.hub.shell.openPath('logs'), {})}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              {t('set.logs_dir')}
+            </Button>
+          </div>
 
           <p className="text-xs text-muted-foreground">{t('set.licence')}</p>
         </CardContent>
@@ -417,7 +415,12 @@ function AdvancedCard({
     <>
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">{t('diag.targets_confirm_title')}</CardTitle>
+          {/* Иконка предупреждения: правка целей искажает результат прогона,
+              и это должно бросаться в глаза до прочтения заголовка. */}
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
+            {t('diag.targets_confirm_title')}
+          </CardTitle>
           <CardDescription className="text-xs">{t('diag.targets_title')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">

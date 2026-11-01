@@ -25,6 +25,13 @@
 import { app, shell } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
+import {
+  APP_NAME,
+  exeFromCommandLine,
+  parseRegOutput,
+  pickUninstallString,
+  pickUninstallerName
+} from './uninstall-search'
 
 /** Корень программы: папка exe, если собрано; иначе корень проекта. */
 export function baseDir(): string {
@@ -320,27 +327,93 @@ function grantUsersAccess(dir: string): void {
  * Где лежит деинсталлятор.
  *
  * Имя у него зависит от настроек установщика: NSIS называет файл по-разному —
- * `unins000.exe`, а если задано имя удаления — «Uninstall Zapret Hub.exe».
- * Поэтому не гадаем по одному имени, а смотрим, что реально лежит в папке
- * программы: сначала точные имена, потом любой подходящий файл.
+ * `unins000.exe`, «Uninstall Zapret Hub.exe», а иногда просто `Uninstall.exe`.
+ * Поэтому не гадаем по одному имени, а ищем в три приёма:
+ *
+ *   1. реестр Windows — там записана точная команда удаления;
+ *   2. имена файлов в папке программы — любой `uninstall*.exe` или `unins*.exe`;
+ *   3. обычные папки установки, если exe запущен не оттуда.
+ *
+ * Раньше искали только два точных имени в одной папке, и кнопка «Удалить
+ * программу» горела серой, хотя деинсталлятор лежал рядом.
  */
-export function uninstallerPath(): string | null {
-  if (!app.isPackaged) return null
-  const wanted = ['Uninstall Zapret Hub.exe', 'unins000.exe']
-  for (const name of wanted) {
-    const candidate = path.join(BASE_DIR, name)
-    if (fs.existsSync(candidate)) return candidate
+export function uninstallerPath(): { path: string; reason: string } {
+  if (!app.isPackaged) {
+    return { path: '', reason: 'программа запущена из исходников — удалять нечего' }
   }
+
+  // 1. Реестр: самая точная запись о том, чем именно удалять программу.
+  const fromRegistry = uninstallerFromRegistry()
+  if (fromRegistry) return { path: fromRegistry, reason: '' }
+
+  // 2. Имена в папке программы и рядом с ней.
+  for (const dir of [BASE_DIR, path.dirname(BASE_DIR), ...knownInstallDirs()]) {
+    const name = pickUninstallerName(listExeNames(dir))
+    if (name) {
+      const full = path.join(dir, name)
+      if (fs.existsSync(full)) return { path: full, reason: '' }
+    }
+  }
+
+  return { path: '', reason: 'деинсталлятор не найден' }
+}
+
+/** Файлы .exe в папке — пустой список, если папку не прочитать. */
+function listExeNames(dir: string): string[] {
   try {
-    const found = fs
-      .readdirSync(BASE_DIR)
-      .filter((name) => /^(unins\d*|uninstall .+)\.exe$/i.test(name))
-      .sort()
-    if (found.length) return path.join(BASE_DIR, found[0])
+    return fs.readdirSync(dir).filter((name) => name.toLowerCase().endsWith('.exe'))
   } catch {
-    /* папка не читается — значит, и удалять нечего */
+    return []
   }
-  return null
+}
+
+/** Куда обычно ставят программу. */
+function knownInstallDirs(): string[] {
+  const dirs = [path.join(BASE_DIR)]
+  for (const variable of ['ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA']) {
+    const root = process.env[variable]
+    if (!root) continue
+    dirs.push(path.join(root, APP_NAME))
+    if (variable === 'LOCALAPPDATA') dirs.push(path.join(root, 'Programs', APP_NAME))
+  }
+  return Array.from(new Set(dirs))
+}
+
+/**
+ * Команда удаления из реестра Windows.
+ *
+ * Обходим все четыре куста: установка бывает на всю машину и на одного
+ * пользователя, 64-битная и 32-битная. Читаем вывод целиком и разбираем его
+ * чистой функцией — так поиск проверяем без Windows.
+ */
+function uninstallerFromRegistry(): string | null {
+  if (process.platform !== 'win32') return null
+  const roots = [
+    'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+  ]
+  const { execFileSync } = require('node:child_process') as typeof import('node:child_process')
+  const blocks = []
+  for (const root of roots) {
+    try {
+      const output = execFileSync('reg', ['query', root, '/s'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 10000,
+        maxBuffer: 32 * 1024 * 1024
+      })
+      blocks.push(...parseRegOutput(String(output)))
+    } catch {
+      /* раздела нет или чтение не удалось — смотрим следующий */
+    }
+  }
+  if (blocks.length === 0) return null
+  const command = pickUninstallString(blocks)
+  if (!command) return null
+  const target = exeFromCommandLine(command)
+  return target && fs.existsSync(target) ? target : null
+
 }
 
 /**
