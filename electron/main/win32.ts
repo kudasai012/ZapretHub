@@ -66,17 +66,28 @@ export async function powershell(script: string, timeout = 20000): Promise<{ cod
   }
 }
 
-/** Есть ли права администратора. */
+/**
+ * Есть ли права администратора.
+ *
+ * Проверка идёт синхронной командой `net session`, а она не быстрая: её звали
+ * и при запуске программы, и перед каждым запуском компонента, и из интерфейса
+ * — на старте обхода это складывалось в секунды ожидания. Права за время
+ * работы программы не меняются: программу на ходу не переподнимают. Поэтому
+ * спрашиваем один раз и помним.
+ */
+let adminCache: boolean | null = null
 export function isAdmin(): boolean {
   if (!IS_WINDOWS) return true
+  if (adminCache !== null) return adminCache
   try {
     // net session требует повышения и падает без него
     const { execSync } = require('node:child_process') as typeof import('node:child_process')
     execSync('net session', { stdio: 'ignore', windowsHide: true })
-    return true
+    adminCache = true
   } catch {
-    return false
+    adminCache = false
   }
+  return adminCache
 }
 
 /** Перезапускает программу с повышением прав через UAC. */
@@ -110,15 +121,35 @@ function runSyncHidden(file: string, args: string[]): number {
 
 export type ServiceState = 'RUNNING' | 'STOPPED' | 'START_PENDING' | 'STOP_PENDING' | 'UNKNOWN' | 'NOT_FOUND'
 
+/** Слова состояний в выводе `sc query`: они не переводятся, в отличие от подписей. */
+const SC_STATE_WORDS: Record<string, ServiceState> = {
+  STOPPED: 'STOPPED',
+  START_PENDING: 'START_PENDING',
+  STOP_PENDING: 'STOP_PENDING',
+  RUNNING: 'RUNNING',
+  PAUSED: 'UNKNOWN'
+}
+
 /**
  * Состояние службы.
  *
- * Спрашиваем Get-Service, а не разбираем вывод `sc query`: sc печатает состояние
- * на языке системы, и на русской Windows строка просто не узнавалась — проверка
- * показывала сырое «UNKNOWN» вместо понятного ответа.
+ * Спрашиваем `sc query` — это доли секунды, тогда как ради PowerShell
+ * поднимается целый процесс, и проверка службы перед каждым запуском обхода
+ * стоила около секунды. Подписи в выводе sc напечатаны на языке системы, зато
+ * само состояние — английским словом: его и ищем.
+ *
+ * Не узнали — спрашиваем Get-Service: он отвечает всегда, просто медленнее.
  */
 export async function queryService(name: string): Promise<ServiceState> {
   if (!IS_WINDOWS) return 'NOT_FOUND'
+  const sc = await run('sc', ['query', name], 10000)
+  if (sc.code === 0) {
+    const match = /([1-4])\s+(STOPPED|START_PENDING|STOP_PENDING|RUNNING|PAUSED)\b/i.exec(sc.stdout)
+    if (match) return SC_STATE_WORDS[match[2].toUpperCase()] ?? 'UNKNOWN'
+  } else {
+    // Службы нет: sc отвечает кодом 1060.
+    return 'NOT_FOUND'
+  }
   const safe = name.replace(/'/g, "''")
   const ps =
     `$s = Get-Service -Name '${safe}' -ErrorAction SilentlyContinue; ` +
@@ -127,13 +158,7 @@ export async function queryService(name: string): Promise<ServiceState> {
   const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const state = (lines[lines.length - 1] ?? '').toUpperCase()
   if (state === 'NOT_FOUND') return 'NOT_FOUND'
-  if (state === '') {
-    // PowerShell не ответил — пробуем старый путь, чтобы не врать про «нет службы»
-    const sc = await run('sc', ['query', name])
-    if (sc.code !== 0) return 'NOT_FOUND'
-    const match = /STATE\s*:\s*\d+\s+(\w+)/i.exec(sc.stdout)
-    return match ? (match[1].toUpperCase() as ServiceState) : 'UNKNOWN'
-  }
+  if (state === '') return 'UNKNOWN'
   return state as ServiceState
 }
 
@@ -148,45 +173,167 @@ export async function removeService(name: string): Promise<boolean> {
 
 // --------------------------------------------------------------- процессы
 
+/** Строка снимка процессов: номер, родитель, образ, командная строка. */
+export interface ProcessRow {
+  pid: number
+  parent: number
+  name: string
+  command: string
+}
+
+/**
+ * Как долго снимок считается свежим.
+ *
+ * Проверки идут одна за другой — образ, путь, порт, дозорные, — и каждая раньше
+ * запускала свой PowerShell. Снимок сводит их к одному запросу: пока он свежий,
+ * отвечаем из памяти.
+ */
+const SNAPSHOT_TTL_MS = 700
+
+let snapshot: { at: number; rows: ProcessRow[] } | null = null
+let snapshotQuery: Promise<ProcessRow[]> | null = null
+
+/** Разбирает строки снимка: поля разделены табуляцией. */
+export function parseProcessRows(text: string): ProcessRow[] {
+  const rows: ProcessRow[] = []
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    const parts = line.split('\t')
+    if (parts.length < 3) continue
+    const pid = Number(parts[0].trim())
+    if (!Number.isFinite(pid) || pid <= 0) continue
+    const parent = Number(parts[1].trim())
+    rows.push({
+      pid,
+      parent: Number.isFinite(parent) ? parent : 0,
+      name: (parts[2] ?? '').trim(),
+      command: parts.slice(3).join('\t').trim()
+    })
+  }
+  return rows
+}
+
+async function queryProcessRows(): Promise<ProcessRow[]> {
+  // Один запрос вместо пяти: номер, родитель, образ и командная строка сразу.
+  // Табуляции и переводы строк из командной строки убраны — на них делится
+  // разбор. Символы берём по коду, чтобы не путать кавычки на пути в PowerShell.
+  const ps =
+    '$sep = [char]9; ' +
+    'Get-CimInstance Win32_Process | ForEach-Object { ' +
+    '$c = ([string]$_.CommandLine).Replace([char]9, [char]32).Replace([char]10, [char]32).Replace([char]13, [char]32); ' +
+    '$_.ProcessId.ToString() + $sep + $_.ParentProcessId.ToString() + $sep + ([string]$_.Name) + $sep + $c }'
+  const result = await powershell(ps, 15000)
+  return parseProcessRows(result.stdout)
+}
+
+/**
+ * Снимок всех процессов в системе.
+ *
+ * `fresh` — нужен именно сейчас, а не секунду назад: так спрашивают там, где
+ * только что что-то убили и ждут, что система это уже заметила.
+ *
+ * Пока запрос идёт, остальные дожидаются его же, а не запускают свой: пять
+ * проверок подряд — это один PowerShell, а не пять.
+ */
+export async function processRows(fresh = false): Promise<ProcessRow[]> {
+  if (!IS_WINDOWS) return []
+  if (!fresh && snapshot && Date.now() - snapshot.at < SNAPSHOT_TTL_MS) return snapshot.rows
+  if (!snapshotQuery) {
+    snapshotQuery = queryProcessRows()
+      .then((rows) => {
+        snapshot = { at: Date.now(), rows }
+        return rows
+      })
+      .catch(() => [] as ProcessRow[])
+      .then((rows) => {
+        snapshotQuery = null
+        return rows
+      })
+  }
+  return snapshotQuery
+}
+
+/**
+ * Снимок больше не годится.
+ *
+ * Только что погасили процесс — значит, в таблице процессов всё по-другому, и
+ * следующие проверки должны увидеть это, а не память секундой раньше.
+ */
+export function invalidateSnapshot(): void {
+  snapshot = null
+}
+
 /** PID всех дочерних процессов данного PID, включая его самого. */
-async function processTree(rootPid: number): Promise<Set<number>> {
+export async function processTree(rootPid: number): Promise<Set<number>> {
   const tree = new Set<number>([rootPid])
   if (!IS_WINDOWS) return tree
-  const result = await powershell(
-    `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${rootPid} } | Select-Object -ExpandProperty ProcessId`
-  )
-  for (const line of result.stdout.split(/\r?\n/)) {
-    const pid = Number(line.trim())
-    if (Number.isFinite(pid) && pid > 0 && !tree.has(pid)) {
-      for (const child of await processTree(pid)) tree.add(child)
+  const rows = await processRows()
+  const children = new Map<number, number[]>()
+  for (const row of rows) {
+    const list = children.get(row.parent)
+    if (list) list.push(row.pid)
+    else children.set(row.parent, [row.pid])
+  }
+  // Дерево собираем в памяти: раньше на каждый уровень уходил свой запрос к
+  // системе, и глубокое дерево компонента стоило несколько секунд.
+  const queue: number[] = [rootPid]
+  while (queue.length > 0) {
+    const pid = queue.pop() as number
+    for (const child of children.get(pid) ?? []) {
+      if (tree.has(child)) continue
+      tree.add(child)
+      queue.push(child)
     }
   }
   return tree
 }
 
-/** PID всех запущенных процессов с данным именем образа. */
-export async function pidsByName(image: string): Promise<number[]> {
-  if (!IS_WINDOWS) return []
-  const result = await powershell(
-    `Get-Process -Name '${image.replace(/'/g, "''")}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`
-  )
-  return result.stdout
-    .split(/\r?\n/)
-    .map((line) => Number(line.trim()))
-    .filter((pid) => Number.isFinite(pid) && pid > 0)
+/**
+ * Запасной путь к PID по имени образа: `tasklist`.
+ *
+ * Снимок процессов — опрос WMI, а он на некоторых машинах бывает выключен или
+ * сломан. Если снимок пуст (а процессы в Windows есть всегда), имя спрашиваем
+ * у tasklist: пропустить чужой winws.exe дороже, чем лишний вызов.
+ */
+async function pidsByNameTasklist(image: string): Promise<number[]> {
+  const result = await run('tasklist', ['/FI', `IMAGENAME eq ${image}`, '/FO', 'CSV', '/NH'], 10000)
+  const pids: number[] = []
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = /^"([^"]*)","(\d+)"/.exec(line.trim())
+    if (!match) continue
+    const pid = Number(match[2])
+    if (Number.isFinite(pid) && pid > 0) pids.push(pid)
+  }
+  return pids
 }
 
-/** Гасит дерево процессов: taskkill /T /F добивает и распакованные копии. */
+/** PID всех запущенных процессов с данным именем образа. */
+export async function pidsByName(image: string, fresh = false): Promise<number[]> {
+  if (!IS_WINDOWS || !image) return []
+  const rows = await processRows(fresh)
+  const want = image.toLowerCase()
+  const withExe = want.endsWith('.exe') ? want : `${want}.exe`
+  const found = rows
+    .filter((row) => {
+      const name = row.name.toLowerCase()
+      return name === want || name === withExe
+    })
+    .map((row) => row.pid)
+  if (found.length > 0 || rows.length > 0) return found
+  return pidsByNameTasklist(image)
+}
+
+/**
+ * Гасит дерево процессов: taskkill /T /F добивает и распакованные копии.
+ *
+ * Дерево перебирать не нужно — taskkill /T гасит его сам. Раньше перед этим
+ * шёл обход дерева через WMI, по запросу на каждый уровень, и остановка
+ * компонента упиралась в эти секунды.
+ */
 export async function killTree(pid: number): Promise<void> {
   if (!IS_WINDOWS) return
-  for (const child of await processTree(pid)) {
-    try {
-      process.kill(child)
-    } catch {
-      /* уже мёртв */
-    }
-  }
-  await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
+  const result = await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
+  if (result.code === 0) invalidateSnapshot()
 }
 
 /** Гасит процессы по имени образа, минуя собственные PID. Возвращает убитые. */
@@ -198,6 +345,7 @@ export async function killForeignProcesses(image: string, ownPids: Set<number>):
     const result = await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
     if (result.code === 0) killed.push(pid)
   }
+  if (killed.length > 0) invalidateSnapshot()
   return killed
 }
 
@@ -231,16 +379,18 @@ export async function killOrphanGuardians(key: string): Promise<number[]> {
   if (!IS_WINDOWS) return []
   const needle = `ZapretHub.Guardian.${key}.`
   const self = `.${process.pid}.ps1`
-  const ps =
-    "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | " +
-    `Where-Object { $_.CommandLine -like '*${needle}*' -and $_.CommandLine -notlike '*${self}*' } | ` +
-    'Select-Object -ExpandProperty ProcessId'
-  const found = await powershell(ps, 15000)
+  // Ищем по снимку процессов: отдельный запрос ради дозорных стоил столько же,
+  // сколько вся подготовка к запуску обхода.
+  const rows = await processRows()
   const killed: number[] = []
-  for (const pid of readPids(found.stdout)) {
+  for (const row of rows) {
+    if (!/powershell/i.test(row.name)) continue
+    if (!row.command.includes(needle) || row.command.includes(self)) continue
+    const pid = row.pid
     const result = await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
     if (result.code === 0) killed.push(pid)
   }
+  if (killed.length > 0) invalidateSnapshot()
   return killed
 }
 
@@ -270,7 +420,8 @@ export async function releaseWinDivert(
   // 1. Чужие копии winws.exe: они и есть владельцы фильтра.
   const deadline = Date.now() + settle
   for (;;) {
-    const foreign = (await pidsByName('winws')).filter((pid) => !ownPids.has(pid))
+    // Свежий снимок: только что погасили, и система должна это показать.
+    const foreign = (await pidsByName('winws', true)).filter((pid) => !ownPids.has(pid))
     if (foreign.length === 0 || Date.now() >= deadline) break
     for (const pid of foreign) {
       const result = await run('taskkill', ['/PID', String(pid), '/T', '/F'], 8000)
@@ -313,12 +464,22 @@ const TCP_PARAM_KEY = 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Paramet
  */
 export async function tcpTimestampsOpt(): Promise<number | null> {
   if (!IS_WINDOWS) return null
+  // `reg query` отвечает за доли секунды, а PowerShell ради одного значения
+  // реестра поднимал отдельный процесс.
+  const result = await run('reg', ['query', TCP_PARAM_KEY, '/v', 'Tcp1323Opts'], 10000)
+  const match = /Tcp1323Opts\s+REG_DWORD\s+(0x[0-9a-fA-F]+|\d+)/i.exec(result.stdout)
+  if (match) {
+    const raw = match[1]
+    const value = /^0x/i.test(raw) ? Number.parseInt(raw.slice(2), 16) : Number.parseInt(raw, 10)
+    if (Number.isFinite(value)) return value
+  }
+  // Вывод не узнали — спросим PowerShell: он отвечает всегда, просто медленнее.
   const ps =
     "$v = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters' " +
     "-Name Tcp1323Opts -ErrorAction SilentlyContinue).Tcp1323Opts; " +
     "if ($null -eq $v) { '' } else { [int]$v }"
-  const result = await powershell(ps, 15000)
-  const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const fallback = await powershell(ps, 15000)
+  const lines = fallback.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const value = Number.parseInt(lines[lines.length - 1] ?? '', 10)
   return Number.isFinite(value) ? value : null
 }
@@ -337,7 +498,12 @@ export function timestampsOn(opt: number | null): boolean {
  */
 export async function enableTcpTimestamps(): Promise<boolean> {
   if (!IS_WINDOWS) return false
+  // Метки времени включают один раз и навсегда. Раньше каждый запуск обхода
+  // платил за netsh и запись в реестр — секунды на ровном месте. Если бит уже
+  // стоит, делать нечего.
+  if (timestampsOn(await tcpTimestampsOpt())) return true
   await run('netsh', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], 10000)
+  if (timestampsOn(await tcpTimestampsOpt())) return true
   const current = await tcpTimestampsOpt()
   const next = (current ?? 3) | 2
   const result = await run(
@@ -534,13 +700,12 @@ export function httpVerdict(exitCode: number, status: number): { ok: boolean; er
  * который остаётся висеть в трее, называется не так, как файл, который мы
  * запустили. Гасить по имени запущенного файла бесполезно — надо по пути.
  */
-export async function pidsByPathNeedle(needle: string): Promise<number[]> {
+export async function pidsByPathNeedle(needle: string, fresh = false): Promise<number[]> {
   if (!IS_WINDOWS || !needle) return []
-  const escaped = needle.replace(/'/g, "''")
-  const result = await powershell(
-    `Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*${escaped}*' } | Select-Object -ExpandProperty Id`
-  )
-  return readPids(result.stdout)
+  // Смотрим в командную строку снимка: путь к программе — её начало. Раньше на
+  // это уходил отдельный PowerShell с перебором всех процессов.
+  const rows = await processRows(fresh)
+  return rows.filter((row) => row.command.includes(needle)).map((row) => row.pid)
 }
 
 /** PID всех процессов, которые слушают порт. */

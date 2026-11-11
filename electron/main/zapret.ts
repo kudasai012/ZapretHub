@@ -601,6 +601,7 @@ export class ZapretComponent {
 
   async start(): Promise<{ ok: boolean; reason: string }> {
     if (this.isRunning()) return { ok: true, reason: '' }
+    const startedAt = Date.now()
     this.reason = ''
     if (!this.installed()) {
       this.log('компонент не установлен')
@@ -617,14 +618,21 @@ export class ZapretComponent {
       return { ok: false, reason: this.reason }
     }
 
-    const conflict = await this.serviceConflict()
+    // Проверки идут вместе, а не гуськом: каждая раньше была отдельным
+    // обращением к системе (свой PowerShell), и в сложении они давали секунды
+    // ожидания на ровном месте — человек нажимал «запустить» и ждал.
+    const [conflict] = await Promise.all([
+      this.serviceConflict(),
+      this.killForeign(),
+      // Метки времени нужны до запуска winws, но готовить их можно заодно с
+      // остальным: это независимые вещи.
+      enableTcpTimestamps()
+    ])
     if (conflict) {
       this.reason = `служба Windows «zapret» активна (${conflict})`
       this.log(`${this.reason} — уберите её, иначе winws.exe не запустится`)
       return { ok: false, reason: this.reason }
     }
-
-    await this.killForeign()
 
     try {
       this.ensureUserLists()
@@ -635,8 +643,6 @@ export class ZapretComponent {
       this.log(this.reason)
       return { ok: false, reason: this.reason }
     }
-
-    await enableTcpTimestamps()
 
     let parsed: { exe: string; args: string[] }
     try {
@@ -657,6 +663,7 @@ export class ZapretComponent {
       const started = await this.spawnWinws(parsed)
       if (started.ok) {
         this.reason = ''
+        this.log(`запущен за ${Date.now() - startedAt} мс`)
         return { ok: true, reason: '' }
       }
       this.reason = started.reason
@@ -690,6 +697,7 @@ export class ZapretComponent {
       )
       await sleep(WINDIVERT_SETTLE_MS)
     }
+    this.log(`запуск не удался за ${Date.now() - startedAt} мс: ${this.reason}`)
     return { ok: false, reason: `${this.reason}. ${FILTER_HINT}` }
   }
 

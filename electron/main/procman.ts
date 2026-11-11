@@ -39,7 +39,7 @@ import {
   pidsByName,
   pidsByPathNeedle,
   pidsByPort,
-  powershell,
+  processTree,
   run,
   spawnDetached,
   clearReleaseFlag,
@@ -316,16 +316,9 @@ export class ManagedProcess {
     const pid = this.proc?.pid
     if (!pid) return
     try {
-      const result = await powershell(
-        `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${pid} } | Select-Object -ExpandProperty ProcessId`,
-        // Короткий срок: снимок — уточнение для подчистки, а не обязательное
-        // условие. Если PowerShell завис, остановка не должна ждать его.
-        2000
-      )
-      for (const line of result.stdout.split(/\r?\n/)) {
-        const child = Number(line.trim())
-        if (Number.isFinite(child) && child > 0) this.tree.add(child)
-      }
+      // Дерево берём из общего снимка процессов: раньше на каждый уровень
+      // уходил свой запрос к системе, и остановка компонента упиралась в них.
+      for (const child of await processTree(pid)) this.tree.add(child)
     } catch {
       /* дерево не снялось — подчистим по имени, это надёжнее догадок */
     }
@@ -395,10 +388,15 @@ export class ManagedProcess {
     const needle = this.options.killNeedle
     const port = this.options.killPort
     const deadline = Date.now() + SWEEP_TIMEOUT_MS
+    // Первый проход смотрит на свежий снимком, дальше — только на новые:
+    // система должна успеть заметить то, что мы только что погасили.
+    let pass = 0
     while (Date.now() < deadline) {
+      const fresh = pass > 0
+      pass += 1
       const [byImage, byPath, byPort] = await Promise.all([
-        image ? pidsByName(image) : Promise.resolve([]),
-        needle ? pidsByPathNeedle(needle) : Promise.resolve([]),
+        image ? pidsByName(image, fresh) : Promise.resolve([]),
+        needle ? pidsByPathNeedle(needle, fresh) : Promise.resolve([]),
         port ? pidsByPort(port) : Promise.resolve([])
       ])
       const foreign = [...byImage, ...byPath, ...byPort].filter((p) => !this.ownPids().has(p))

@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import { configStore, tmpDir } from './config'
 import { ensureDirs, BASE_DIR, APP_DIR_NAME, DATA_ROOT } from './paths'
 import { logger } from './logger'
+import { pollPeriodMs } from './performance'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent } from './tgws'
 import { announceUpdates, attachServices, broadcastAll, emit, registerIpc } from './ipc'
@@ -100,6 +101,7 @@ function createWindow(showNow = false): void {
 
   mainWindow.on('maximize', () => broadcastWindowState(mainWindow))
   mainWindow.on('unmaximize', () => broadcastWindowState(mainWindow))
+  refreshOnShow(mainWindow)
 
   mainWindow.on('ready-to-show', () => {
     if (!mainWindow) return
@@ -386,12 +388,23 @@ function broadcastWindowState(window: BrowserWindow | null): void {
  * выключен, кнопка молча ничего не делала с Zapret. Теперь запускается всё,
  * что установлено.
  */
+/**
+ * Поднимает оба компонента.
+ *
+ * Вместе, а не по очереди: раньше программа ждала, пока поднимется zapret, и
+ * только потом принималась за TG WS Proxy — человек нажимал «Запустить всё» и
+ * считал секунды, хотя друг другу компоненты не мешают.
+ */
 async function startAll(): Promise<void> {
-  for (const component of [zapret, tgws]) {
-    if (!component) continue
-    if (!component.installed()) continue
-    await component.start()
-  }
+  const startedAt = Date.now()
+  await Promise.all(
+    [zapret, tgws].map((component) => {
+      if (!component) return Promise.resolve()
+      if (!component.installed()) return Promise.resolve()
+      return component.start()
+    })
+  )
+  logger.write(`[hub] компоненты подняты за ${Date.now() - startedAt} мс`)
   broadcastAll()
   updateTrayMenu()
 }
@@ -431,21 +444,62 @@ async function stopAll(): Promise<void> {
   updateTrayMenu()
 }
 
-/** Подписывает компоненты на свои события, чтобы интерфейс узнавал о смене статуса. */
+/** Видно ли окно: свёрнутое в трей окно перерисовывать незачем. */
+function windowOnScreen(): boolean {
+  return !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
+}
+
+/**
+ * Подписывает компоненты на свои события, чтобы интерфейс узнавал о смене
+ * статуса.
+ *
+ * Интервал не постоянный: когда программы не видно, состояние нужно только
+ * значку в трее, а будить им интерфейс незачем — опрашиваем втрое реже. Как
+ * только окно вернулось на экран, опрос снова частый, а свежее состояние
+ * приходит сразу, не дожидаясь очередного прохода.
+ */
 function watchComponents(): void {
-  // статус меняется внутри ManagedProcess; опрашиваем его регулярно и
-  // рассылаем всем, кто слушает. Дёшево: раз в 700 мс, только при изменении.
   let last = ''
+  let timer: NodeJS.Timeout | null = null
+
   const tick = (): void => {
     const signature = `${zapret.status}|${zapret.statusReason}|${tgws.status}|${tgws.statusReason}`
     if (signature !== last) {
       last = signature
-      broadcastAll()
+      // Пока окна нет, рассылать состояние некому: интерфейс всё равно
+      // обновится, едва окно вернётся (см. refreshOnShow). Значок в трее
+      // от этого не зависит — он строится здесь же.
+      if (windowOnScreen()) broadcastAll()
       updateTrayMenu()
     }
   }
+
+  const schedule = (): void => {
+    const period = pollPeriodMs(windowOnScreen())
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      tick()
+      schedule()
+    }, period)
+    timer.unref()
+  }
+
   tick()
-  setInterval(tick, 700).unref()
+  schedule()
+}
+
+/**
+ * Обновляет интерфейс, едва окно вернулось на экран.
+ *
+ * Пока программы не было видно, состояние ей не рассылалось — иначе каждое
+ * обновление будило бы спящий интерфейс. Здесь она получает его целиком,
+ * поэтому на экране всегда свежие цифры, а не те, что были до свёртывания.
+ */
+function refreshOnShow(window: BrowserWindow): void {
+  window.on('show', () => {
+    broadcastAll()
+    broadcastWindowState(window)
+  })
 }
 
 async function bootstrap(): Promise<void> {
@@ -514,8 +568,10 @@ async function bootstrap(): Promise<void> {
   if (toStart.length > 0) {
     const delay = autostart.delaySeconds
     const start = (): void => {
+      const startedAt = Date.now()
       void (async () => {
-        for (const key of toStart) await toggleOne(key)
+        await Promise.all(toStart.map((key) => toggleOne(key)))
+        logger.write(`[hub] автозапуск обходов занял ${Date.now() - startedAt} мс`)
       })()
     }
     if (delay > 0) setTimeout(start, delay * 1000).unref()

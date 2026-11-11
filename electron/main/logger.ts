@@ -12,6 +12,15 @@ import { HUB_LOG_FILE, LOGS_DIR } from './paths'
 const MAX_LOG_BYTES = 2 * 1024 * 1024
 const LOG_BACKUPS = 2
 
+/**
+ * Предел для журналов компонентов.
+ *
+ * Вывод winws льётся непрерывно, и за несколько дней без обрезки файл
+ * вырастает до сотен мегабайт: он лежит в папке программы, занимает диск и
+ * не открывается ни одним блокнотом.
+ */
+const MAX_COMPONENT_BYTES = 2 * 1024 * 1024
+
 export class Logger {
   private readonly file: string
 
@@ -39,25 +48,39 @@ export class Logger {
   writeTo(name: string, line: string): void {
     try {
       const target = path.join(LOGS_DIR, name)
+      this.rotate(target, MAX_COMPONENT_BYTES, 1)
       fs.appendFileSync(target, `${line}\n`, 'utf8')
     } catch {
       /* см. выше */
     }
   }
 
-  private rotateIfNeeded(): void {
+  /**
+   * Обрезает файл, если он перерос предел.
+   *
+   * Проверка по размеру, а не по дате: журнал компонента может набрать
+   * предел за вечер, а может не набрать его за месяц — человеку важно, чтобы
+   * файл открывался, а не чтобы он был свежим.
+   */
+  private rotate(target: string, maxBytes: number, backups: number): void {
     try {
-      if (!fs.existsSync(this.file)) return
-      if (fs.statSync(this.file).size <= MAX_LOG_BYTES) return
-      for (let i = LOG_BACKUPS; i > 0; i -= 1) {
-        const src = `${this.file}.${i}`
-        const dst = `${this.file}.${i + 1}`
-        if (fs.existsSync(src)) fs.renameSync(src, dst)
+      if (!fs.existsSync(target)) return
+      if (fs.statSync(target).size <= maxBytes) return
+      // Самую старую копию выбрасываем: она всё равно за пределами счёта.
+      fs.rmSync(`${target}.${backups + 1}`, { force: true })
+      for (let i = backups; i > 0; i -= 1) {
+        const src = `${target}.${i}`
+        if (!fs.existsSync(src)) continue
+        fs.renameSync(src, `${target}.${i + 1}`)
       }
-      fs.renameSync(this.file, `${this.file}.1`)
+      fs.renameSync(target, `${target}.1`)
     } catch {
       /* не смогли — пишем дальше в тот же файл */
     }
+  }
+
+  private rotateIfNeeded(): void {
+    this.rotate(this.file, MAX_LOG_BYTES, LOG_BACKUPS)
   }
 }
 

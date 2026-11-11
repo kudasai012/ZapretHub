@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import type { AppUpdateInfo, ComponentKey } from '@shared/contract'
 import { AppShell, type PageKey } from '@/components/app-shell'
 import { Toaster } from '@/components/toast-viewport'
@@ -19,9 +19,30 @@ import {
   useZapret
 } from '@/hooks/use-hub'
 import { HomePage } from '@/pages/home-page'
-import { ComponentsPage } from '@/pages/components-page'
-import { DiagnosticsPage } from '@/pages/diagnostics-page'
-import { SettingsPage } from '@/pages/settings-page'
+
+/**
+ * Остальные разделы грузятся по щелчку, а не все сразу.
+ *
+ * Главная нужна в первую же секунду, поэтому она в общем пакете. Компоненты,
+ * диагностика и настройки — отдельными кусками: их код разбирается и
+ * выполняется только когда человек туда перешёл. Это и память, и время до
+ * первого кадра: меньше работы — быстрее окно.
+ *
+ * Пакеты подтягиваются сразу после показа Главной (см. useEffect ниже), поэтому
+ * переход на раздел не ждёт сети и пакета: к тому моменту он уже в памяти.
+ */
+const ComponentsPage = lazy(() => import('@/pages/components-page').then((m) => ({ default: m.ComponentsPage })))
+const DiagnosticsPage = lazy(() => import('@/pages/diagnostics-page').then((m) => ({ default: m.DiagnosticsPage })))
+const SettingsPage = lazy(() => import('@/pages/settings-page').then((m) => ({ default: m.SettingsPage })))
+
+/** Заготовка на те полсекунды, пока пакет раздела в пути. */
+function PageFallback() {
+  return (
+    <div className="flex h-40 items-center justify-center">
+      <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-muted border-t-foreground" />
+    </div>
+  )
+}
 
 /**
  * Корень интерфейса.
@@ -81,6 +102,21 @@ export default function App() {
     return off
   }, [])
 
+  // Разделы подтягиваем сразу, как только Главная нарисовалась: человеку
+  // незачем ждать загрузки в тот момент, когда он уже щёлкнул.
+  useEffect(() => {
+    const load = (): void => {
+      void import('@/pages/components-page')
+      void import('@/pages/diagnostics-page')
+      void import('@/pages/settings-page')
+    }
+    // requestIdleCallback есть не везде — без него грузим на следующем такте.
+    const idle = (window as unknown as { requestIdleCallback?: (cb: () => void) => number })
+      .requestIdleCallback
+    if (typeof idle === 'function') idle(load)
+    else setTimeout(load, 200)
+  }, [])
+
   // Все хуки зовём до раннего возврата: иначе React считает, что их число
   // между отрисовками изменилось, и падает с ошибкой правил хуков.
   const t = useT(config?.general.language ?? 'ru')
@@ -108,23 +144,25 @@ export default function App() {
       onOpenProgress={() => setProgressMinimized(false)}
     >
       {page === 'home' ? <HomePage config={config} home={home} onNavigate={setPage} /> : null}
-      {page === 'components' ? (
-        <ComponentsPage config={config} zapret={zapret} onRefresh={() => void refresh()} />
-      ) : null}
-      {page === 'diagnostics' ? (
-        <DiagnosticsPage
-          config={config}
-          zapret={
-            zapret
-              ? { installed: zapret.installed, strategies: zapret.strategies, strategy: zapret.strategy }
-              : null
-          }
-          run={diagnostics}
-        />
-      ) : null}
-      {page === 'settings' ? (
-        <SettingsPage config={config} home={home} onShowRelease={() => setReleaseOpen(true)} />
-      ) : null}
+      <Suspense fallback={<PageFallback />}>
+        {page === 'components' ? (
+          <ComponentsPage config={config} zapret={zapret} onRefresh={() => void refresh()} />
+        ) : null}
+        {page === 'diagnostics' ? (
+          <DiagnosticsPage
+            config={config}
+            zapret={
+              zapret
+                ? { installed: zapret.installed, strategies: zapret.strategies, strategy: zapret.strategy }
+                : null
+            }
+            run={diagnostics}
+          />
+        ) : null}
+        {page === 'settings' ? (
+          <SettingsPage config={config} home={home} onShowRelease={() => setReleaseOpen(true)} />
+        ) : null}
+      </Suspense>
 
       {/* Предложение при запуске: компонентов нет — скачать их прямо сейчас. */}
       <MissingComponentsDialog
