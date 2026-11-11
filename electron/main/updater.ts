@@ -21,6 +21,7 @@ import { BACKUPS_DIR } from './paths'
 import { configStore, dueForCheck, tmpDir } from './config'
 import { emit } from './ipc'
 import { logger } from './logger'
+import { relaunchArgs } from './updated'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent, EXE_NAME } from './tgws'
 
@@ -413,49 +414,220 @@ function copyRecursive(source: string, destination: string): void {
   }
 }
 
+/** Что сторожу нужно знать, чтобы поднять программу после установки. */
+export interface RelaunchGuardOptions {
+  /** Номер процесса установщика: по нему и ждём конца установки. */
+  installerPid: number
+  /** Имя образа установщика без .exe — на случай, если он перезапустился. */
+  installerName: string
+  /** Полный путь к exe программы. */
+  appPath: string
+  /** Имя образа программы без .exe: по нему проверяем, поднялась ли она. */
+  appName: string
+  /** Версия, с которой обновлялись: её покажет окно перехода. */
+  fromVersion: string
+  /**
+   * Это переустановка той же версии, а не обновление.
+   *
+   * В окне перехода тогда нет стрелки «было → стало»: версия одна и та же.
+   */
+  reinstall?: boolean
+  /** Сколько ждать установщик, секунд. */
+  timeoutSeconds?: number
+}
+
+/** Кавычки внутри одинарных строк PowerShell удваиваются. */
+const psString = (text: string): string => `'${text.replace(/'/g, "''")}'`
+
 /**
- * Сторож, который поднимает программу после обновления.
+ * Сценарий сторожа: дождаться конца установки и поднять программу.
+ *
+ * Раньше это был командный файл, который искал установщик по имени в выводе
+ * `tasklist` — и потому висел на экране, а иногда не закрывался вовсе: имя
+ * образа в выводе `tasklist` обрезается, сторож не находил того, что искал, и
+ * крутил ожидание без конца. Теперь сценарий ждёт не имя, а номер процесса —
+ * тот самый, под которым мы установщик и запустили, — да и выполняется он
+ * скрытым PowerShell, поэтому никакого окна на экране нет.
  *
  * Ключа «--force-run» мало: установщики прежних сборок его не знают и молча
  * пропускают, а тихая установка сама программу не запускает. Сторож живёт
- * отдельным процессом: он дожидается конца установщика — наша программа к
- * этому времени уже закрыта — и поднимает её, если та не поднялась сама.
- *
- * Текст только латиницей: установщик и папка программы могут лежать там, где
- * кириллица в командных файлах читается криво.
+ * отдельным процессом: наша программа к моменту конца установки уже закрыта.
  */
-function writeRelaunchScript(installerName: string): void {
+export function relaunchGuardScript(options: RelaunchGuardOptions): string {
+  const seconds = Math.min(3600, Math.max(60, Math.trunc(options.timeoutSeconds ?? 900)))
+  const args = relaunchArgs(options.fromVersion, options.reinstall === true)
+    .map((arg) => psString(arg))
+    .join(',')
+  const start = `Start-Process -FilePath ${psString(options.appPath)} -ArgumentList @(${args})`
+  return [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$installer=${Math.trunc(options.installerPid)}`,
+    `$setup=${psString(options.installerName)}`,
+    `$name=${psString(options.appName)}`,
+    `$deadline=(Get-Date).AddSeconds(${seconds})`,
+    // Ждём именно номер процесса. Имя — только подстраховка: если установщик
+    // перезапустился с повышением прав, его номер сменился, а имя то же.
+    'while((Get-Date) -lt $deadline){',
+    '  if(-not (Get-Process -Id $installer -ErrorAction SilentlyContinue)){',
+    '    if(-not (Get-Process -Name $setup -ErrorAction SilentlyContinue)){ break }',
+    '  }',
+    '  Start-Sleep -Milliseconds 500',
+    '}',
+    // Установщик закончил, но программу он мог ещё не открыть: даём полторы
+    // секунды, иначе поднимем второй экземпляр рядом с его собственным.
+    'Start-Sleep -Milliseconds 1500',
+    'if(-not (Get-Process -Name $name -ErrorAction SilentlyContinue)){',
+    `  ${start}`,
+    '}',
+    // Сценарий одноразовый: стираем себя, чтобы в temp не копились файлы.
+    'try{ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }catch{}',
+    'exit'
+  ].join('\n')
+}
+
+/**
+ * Поднимает сторожа обновления.
+ *
+ * Окно ему не нужно вовсе: запускаем скрытым PowerShell — тем же способом,
+ * каким поднимаем дозорного компонентов. Командная строка здесь не годится:
+ * отдельный процесс cmd.exe получает собственное окно, и спрятать его из
+ * программы нельзя.
+ */
+export function spawnRelaunchGuard(options: RelaunchGuardOptions): void {
   if (process.platform !== 'win32') return
   try {
-    const appPath = app.getPath('exe')
-    const appName = path.basename(appPath)
-    const lines = [
-      '@echo off',
-      'rem Zapret Hub: start the program after the update',
-      ':wait',
-      `tasklist /FI "IMAGENAME eq ${installerName}" 2>nul | find /I "${installerName}" >nul`,
-      'if not errorlevel 1 (',
-      '  timeout /t 1 /nobreak >nul',
-      '  goto wait',
-      ')',
-      `tasklist /FI "IMAGENAME eq ${appName}" 2>nul | find /I "${appName}" >nul`,
-      'if errorlevel 1 start "" "' + appPath + '"',
-      'del "%~f0" >nul 2>&1',
-      ''
-    ]
-    const script = path.join(os.tmpdir(), 'zaprethub-relaunch.cmd')
-    fs.writeFileSync(script, lines.join('\r\n'), 'ascii')
+    const file = path.join(os.tmpdir(), `ZapretHub.Relaunch.${process.pid}.ps1`)
+    // BOM: PowerShell 5.1 без метки читает файл в системной кодировке.
+    fs.writeFileSync(file, `\ufeff${relaunchGuardScript(options)}`, 'utf8')
     const { spawn } = require('node:child_process') as typeof import('node:child_process')
-    spawn('cmd.exe', ['/c', script], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true
-    }).unref()
-    logger.write('[hub] после обновления программу поднимет: ' + script)
+    spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', file],
+      { detached: true, stdio: 'ignore', windowsHide: true }
+    ).unref()
+    logger.write(`[hub] после обновления программу поднимет: ${file}`)
   } catch (error) {
     // Сторож — страховка, не основа: без него установщик поднимет программу сам
     logger.write('[hub] сторож перезапуска не записался: ' + String(error))
   }
+}
+
+/**
+ * Переустановка программы.
+ *
+ * Нужна, когда программа сломана или поставлена криво: переустановка кладёт
+ * файлы заново, а настройки и компоненты трогать не обязана — установщик
+ * пишет поверх существующего.
+ *
+ * Заодно решает и вторую задачу: если на GitHub к этому моменту вышла новая
+ * версия, человеку незачем ставить старую — ему предлагают обновление, а не
+ * молча переустанавливают то же самое.
+ */
+export type ReinstallKind = 'reinstall' | 'update'
+
+export interface ReinstallResult {
+  ok: boolean
+  message: string
+  /** Чем кончилось: поставили заново или нашли обновление. */
+  kind: ReinstallKind
+  /** Что известно об обновлении, когда оно нашлось. */
+  info: AppUpdateInfo | null
+}
+
+/**
+ * Что делать: ставить заново или предлагать обновление.
+ *
+ * Отдельная функция, а не ветка внутри переустановки: решение чистое, и по
+ * нему стенд проверяет выбор, не обращаясь к GitHub.
+ */
+export function reinstallKind(latest: string, current: string): ReinstallKind {
+  const next = String(latest ?? '').replace(/^v/, '').trim()
+  const now = String(current ?? '').trim()
+  if (!next || !now) return 'reinstall'
+  return compareVersions(next, now) > 0 ? 'update' : 'reinstall'
+}
+
+/**
+ * Переустановка программы: той же версии, либо предложение обновиться.
+ *
+ * Программа закрывается сама — так же, как при обновлении: exe занят, пока
+ * программа работает, поэтому ставит всегда установщик. Поднимает программу
+ * сторож, он же передаёт ей версию, с которой её ставили.
+ */
+export async function reinstallApp(): Promise<ReinstallResult> {
+  const current = app.getVersion()
+  const release = await latestRelease(APP_REPO)
+  if (!release) {
+    return { ok: false, message: 'не удалось спросить GitHub', kind: 'reinstall', info: null }
+  }
+  const latest = (release.tag_name ?? '').replace(/^v/, '')
+  const kind = reinstallKind(latest, current)
+  if (kind === 'update') {
+    return {
+      ok: true,
+      message: `на GitHub есть ${latest}, стоит ${current}`,
+      kind,
+      info: {
+        current,
+        latest,
+        url: release.html_url,
+        notes: (release.body ?? '').slice(0, 4000),
+        publishedAt: release.published_at ?? ''
+      }
+    }
+  }
+  const files = assets(release)
+  const installer = files.find((asset) => /\.exe$/i.test(asset.name))
+  if (!installer) {
+    return {
+      ok: false,
+      message: 'в релизе нет установщика',
+      kind: 'reinstall',
+      info: null
+    }
+  }
+  try {
+    await download(installer.browser_download_url, path.join(os.tmpdir(), installer.name), (percent, stage, message) =>
+      report('app', percent, stage, message)
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { ok: false, message, kind: 'reinstall', info: null }
+  }
+  runInstaller(path.join(os.tmpdir(), installer.name), current, true)
+  return {
+    ok: true,
+    message: 'программа закроется, переустановится и поднимется сама',
+    kind: 'reinstall',
+    info: null
+  }
+}
+
+/**
+ * Ставит скачанный установщик тихо и ставит сторожа.
+ *
+ * @param reinstall это переустановка той же версии, а не обновление: тогда
+ *   окно перехода показывает версию без стрелки.
+ */
+function runInstaller(target: string, fromVersion: string, reinstall: boolean): void {
+  const { spawn } = require('node:child_process') as typeof import('node:child_process')
+  const setup = spawn(target, ['/S', '--force-run'], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  })
+  setup.unref()
+  // Сторожа ставим по номеру запущенного установщика: ждать по имени он
+  // будет вечно, если имя в выводе tasklist окажется обрезанным.
+  if (!setup.pid) return
+  spawnRelaunchGuard({
+    installerPid: setup.pid,
+    installerName: path.basename(target).replace(/\.exe$/i, ''),
+    appPath: app.getPath('exe'),
+    appName: path.basename(app.getPath('exe')).replace(/\.exe$/i, ''),
+    fromVersion,
+    reinstall
+  })
 }
 
 /**
@@ -482,7 +654,6 @@ export async function applyAppUpdate(): Promise<{ ok: boolean; message: string }
     await download(installer.browser_download_url, target, (percent, stage, message) =>
       say(percent, stage, message)
     )
-    const { spawn } = require('node:child_process') as typeof import('node:child_process')
     // Ключ тишины — «/S». Установщик собирает NSIS, а не Inno Setup, и ключи
     // Inno (/VERYSILENT, /SUPPRESSMSGSBOXES, /NORESTART) он не понимает: раньше
     // здесь стояли они, и вместо тихой установки человеку открывался мастер
@@ -492,14 +663,10 @@ export async function applyAppUpdate(): Promise<{ ok: boolean; message: string }
     //
     // «--force-run» — просьба поднять программу после тихой установки: без
     // неё NSIS считает, что тихая установка ничего не запускает, и человек
-    // остаётся перед пустым рабочим столом.
-    const installerName = path.basename(target)
-    writeRelaunchScript(installerName)
-    spawn(target, ['/S', '--force-run'], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true
-    }).unref()
+    // остаётся перед пустым рабочим столом. Сторож ниже — на тот случай,
+    // если установщик этой просьбы не знает: он поднимет программу сам и
+    // передаст ей версию, с которой её обновляли.
+    runInstaller(target, app.getVersion(), false)
     say(100, 'done', 'установщик запущен')
     return { ok: true, message: 'установщик запущен, программа закроется и поднимется сама' }
   } catch (error) {

@@ -143,7 +143,9 @@ export default function App() {
       progress={progressMinimized ? progress : null}
       onOpenProgress={() => setProgressMinimized(false)}
     >
-      {page === 'home' ? <HomePage config={config} home={home} onNavigate={setPage} /> : null}
+      {page === 'home' ? (
+        <HomePage config={config} home={home} onNavigate={setPage} onRefresh={() => void refresh()} />
+      ) : null}
       <Suspense fallback={<PageFallback />}>
         {page === 'components' ? (
           <ComponentsPage config={config} zapret={zapret} onRefresh={() => void refresh()} />
@@ -160,7 +162,15 @@ export default function App() {
           />
         ) : null}
         {page === 'settings' ? (
-          <SettingsPage config={config} home={home} onShowRelease={() => setReleaseOpen(true)} />
+          <SettingsPage
+          config={config}
+          home={home}
+          onShowRelease={() => setReleaseOpen(true)}
+          onOfferUpdate={(info) => {
+            setAppUpdate(info)
+            setReleaseOpen(true)
+          }}
+        />
         ) : null}
       </Suspense>
 

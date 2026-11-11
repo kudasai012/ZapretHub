@@ -19,6 +19,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { StatusDot, statusTone } from '@/components/status-dot'
+import { AddressAdder } from '@/components/address-adder'
 import { StrategyProbe } from '@/components/strategy-probe'
 import { cn } from '@/lib/utils'
 import { CIRCLE_CLASS, isTransitioning, stateText, verdictOf } from '@/lib/verdict'
@@ -37,11 +38,14 @@ import type { PageKey } from '@/components/app-shell'
 export function HomePage({
   config,
   home,
-  onNavigate
+  onNavigate,
+  onRefresh
 }: {
   config: AppConfig
   home: HomeState | null
   onNavigate: (page: PageKey) => void
+  /** Перечитать состояние: после правки списка обход поднимается заново. */
+  onRefresh?: () => void
 }) {
   const t = useT(config.general.language)
   const [pending, setPending] = useState<'zapret' | 'tgws' | null>(null)
@@ -297,6 +301,14 @@ export function HomePage({
           strategy={config.zapret.strategy || ''}
           bypassRunning={zapret?.status === 'running'}
           t={t}
+        />
+
+        {/* Добавить адрес — сразу после проверки: именно она показывает, что
+            сайт не открывается, и рука тянется дописать его в список. */}
+        <AddressAdder
+          config={config}
+          zapret={home?.zapretState ?? null}
+          onRefresh={() => onRefresh?.()}
         />
       </section>
     </div>

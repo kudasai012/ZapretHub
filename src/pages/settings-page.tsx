@@ -5,9 +5,10 @@ import {
   ExternalLink,
   FolderOpen,
   RefreshCw,
+  RotateCcw,
   Trash2
 } from 'lucide-react'
-import type { AppConfig, ComponentKey, HomeState, UpdateInfo } from '@shared/contract'
+import type { AppConfig, AppUpdateInfo, ComponentKey, HomeState, UpdateInfo } from '@shared/contract'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -46,15 +47,20 @@ const CONFIRM_DELAY_MS = 5000
 export function SettingsPage({
   config,
   home,
-  onShowRelease
+  onShowRelease,
+  onOfferUpdate
 }: {
   config: AppConfig
   home: HomeState | null
   onShowRelease: () => void
+  /** На GitHub нашлась новая версия: показать её и предложить обновиться. */
+  onOfferUpdate: (info: AppUpdateInfo) => void
 }) {
   const t = useT(config.general.language)
   const action = useAction(t)
   const [appVersion, setAppVersion] = useState('')
+  /** Переустановка: идёт разговор с GitHub и скачивание установщика. */
+  const [busyReinstall, setBusyReinstall] = useState(false)
   /** Удаление программы: есть ли деинсталлятор и открыт ли вопрос. */
   const [canUninstall, setCanUninstall] = useState(false)
   const [uninstallWhy, setUninstallWhy] = useState('')
@@ -116,6 +122,38 @@ export function SettingsPage({
    * выбор и перезапускаем программу: новый процесс сразу прочитает новое
    * значение. Без перезапуска часть надписей осталась бы старой.
    */
+  /**
+   * Переустановка программы.
+   *
+   * Если на GitHub уже лежит новая версия, ставить ту же самую незачем:
+   * показываем релиз и даём человеку выбрать. Иначе — ставим заново молча,
+   * как обновление: программа закроется, поставится и поднимется сама.
+   */
+  const reinstall = async (): Promise<void> => {
+    setBusyReinstall(true)
+    try {
+      const result = await window.hub.app.reinstall()
+      if (result.kind === 'update' && result.info) {
+        onOfferUpdate(result.info)
+        return
+      }
+      if (!result.ok) {
+        toast({ title: t('set.reinstall_failed'), description: result.message, variant: 'destructive' })
+        return
+      }
+      toast({ title: t('set.reinstall_started'), variant: 'success' })
+    } catch (error) {
+      toast({
+        title: t('set.reinstall_failed'),
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'destructive'
+      })
+    } finally {
+      // Успешный исход сюда обычно не доходит: программу закрывает установщик.
+      setBusyReinstall(false)
+    }
+  }
+
   const changeLanguage = (value: string) => {
     void (async () => {
       const next = await window.hub.config.save({ general: { language: value as 'ru' | 'en' } })
@@ -252,7 +290,7 @@ export function SettingsPage({
               alt=""
               width={44}
               height={44}
-              className="h-11 w-11 shrink-0 rounded-md border"
+              className="h-11 w-11 shrink-0"
             />
             <div className="min-w-0 flex-1 space-y-0.5">
               <p className="text-sm font-semibold">Zapret Hub</p>
@@ -260,6 +298,23 @@ export function SettingsPage({
                 {t('set.version')}: <span className="text-foreground">{appVersion || '…'}</span>
               </p>
             </div>
+            {/* Переустановка рядом с удалением: оба действия — про саму
+                программу, а не про обход. Кнопку показываем только
+                установленной копии: у запущенной из исходников установщика
+                нет, и кнопка бы просто не сработала. */}
+            {canUninstall ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                disabled={busyReinstall}
+                onClick={() => void reinstall()}
+                title={t('set.reinstall_hint')}
+              >
+                <RotateCcw className={busyReinstall ? 'h-3.5 w-3.5 animate-spin' : 'h-3.5 w-3.5'} />
+                {t('set.reinstall')}
+              </Button>
+            ) : null}
             <Button
               variant="outline"
               size="sm"

@@ -12,6 +12,7 @@ import { configStore, tmpDir } from './config'
 import { ensureDirs, BASE_DIR, APP_DIR_NAME, DATA_ROOT } from './paths'
 import { logger } from './logger'
 import { pollPeriodMs } from './performance'
+import { reinstalled, updatedFrom, updateSplashHtml } from './updated'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent } from './tgws'
 import { announceUpdates, attachServices, broadcastAll, emit, registerIpc } from './ipc'
@@ -254,6 +255,65 @@ function createWindow(showNow = false): void {
  * Создание занимает доли секунды — это плата за то, что закрытие окна из
  * списка окон больше не убивает программу.
  */
+/** Сколько держим окно перехода: успевает прочитать, но не надоедает. */
+const SPLASH_MS = 2600
+
+/**
+ * Окно перехода: «было 1.0.6 — стало 1.0.7».
+ *
+ * Программа поднимается уже обновлённой, поэтому увидеть этот переход может
+ * только она сама: старая к этому моменту закрыта, установщик работает тихо.
+ * Раньше вместо окна на экране висело командное окно сторожа — оно и смотрелось
+ * чужим, и закрывалось не всегда.
+ *
+ * Окно не зависит от основного: у него нет своей предзагрузки и нет Node,
+ * разметка полностью своя (см. updateSplashHtml). Оно живёт несколько секунд,
+ * закрывается само и отдаёт экран настоящему окну.
+ */
+function showUpdateSplash(from: string, to: string, openMain: boolean, again = false): void {
+  const lang = configStore.get().general.language
+  const splash = new BrowserWindow({
+    width: 420,
+    height: 260,
+    frame: false,
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    // Окно не должно отсчитываться как второе окно программы: в панели задач
+    // и в Alt+Tab ему делать нечего, оно на несколько секунд.
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    center: true,
+    show: false,
+    backgroundColor: '#09090b',
+    title: APP_DIR_NAME,
+    icon: windowIconPath(),
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      // Своей разметке ничего внешнего не нужно: ни сеть, ни отдельные окна.
+      offscreen: false
+    }
+  })
+  splash.once('ready-to-show', () => splash.show())
+  // Закрыть по щелчку: человеку не обязательно ждать, если он уже прочитал.
+  const close = (): void => {
+    if (!splash.isDestroyed()) splash.close()
+  }
+  splash.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(updateSplashHtml(from, to, lang, again))}`
+  )
+  setTimeout(() => {
+    close()
+    // Настоящее окно открываем сразу за переходом: пустая пауза между ними
+    // читается как «программа задумалась».
+    if (openMain) createWindow(true)
+  }, SPLASH_MS)
+}
+
 function showWindow(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore()
@@ -546,7 +606,24 @@ async function bootstrap(): Promise<void> {
   // Окно создаём, только если его должны увидеть: запускаясь в трей, программа
   // не держит в памяти лишний интерфейс — а он появляется по первому щелчку по
   // иконке в трее (showWindow).
-  if (!configStore.get().general.startMinimized && !startedAtLogin()) createWindow()
+  // Обычно окно создаём, если его должны увидеть: запускаясь в трей, программа
+  // не держит в памяти лишний интерфейс — а он появляется по первому щелчку по
+  // иконке в трее (showWindow).
+  const shouldShow = !configStore.get().general.startMinimized && !startedAtLogin()
+  const previous = updatedFrom()
+  const again = reinstalled()
+  // Переустановку показываем и тогда, когда версия не изменилась: программу
+  // поставили заново, и человек должен это увидеть.
+  if (previous && (again || previous !== app.getVersion())) {
+    // Программу подняли после обновления или переустановки: показываем,
+    // с какой версии пришли. Ключи передаёт сторож (см. spawnRelaunchGuard).
+    logger.write(
+      `[hub] запуск после ${again ? 'переустановки' : 'обновления'}: ${previous} → ${app.getVersion()}`
+    )
+    showUpdateSplash(previous, app.getVersion(), shouldShow, again)
+  } else if (shouldShow) {
+    createWindow()
+  }
   createTray()
   watchComponents()
 

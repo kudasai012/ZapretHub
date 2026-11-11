@@ -39,6 +39,7 @@ import {
   componentVersions,
   applyAppUpdate,
   applyComponentUpdate
+, reinstallApp
 } from './updater'
 import type { BrowserId } from './browsers'
 import { BROWSER_NAMES, DOH_PROVIDERS, applyBrowsersDoh } from './browsers'
@@ -626,6 +627,22 @@ export function registerIpc(): void {
   // Причину отдаём вместе с ответом: когда кнопка «Удалить программу» серая,
   // человек должен понимать почему, а не гадать, сломалось или так надо.
   ipcMain.handle('app:uninstallInfo', () => uninstallerPath())
+
+  /**
+   * Переустановка программы той же версией.
+   *
+   * Программа закрывается сама: exe занят, пока она работает, поэтому ставит
+   * всегда установщик. Поднимает её тот же сторож, что и после обновления,
+   * поэтому окно перехода человек увидит и здесь.
+   */
+  ipcMain.handle('app:reinstall', async () => {
+    logger.write('[hub] переустановка программы по просьбе интерфейса')
+    const result = await reinstallApp()
+    logger.write(
+      `[hub] переустановка: ${result.kind}, ${result.ok ? 'удалось' : 'не удалось'} — ${result.message}`
+    )
+    return result
+  })
 
   ipcMain.handle('app:uninstall', async () => {
     const found = uninstallerPath()
