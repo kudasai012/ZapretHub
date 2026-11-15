@@ -12,7 +12,7 @@ import { configStore, tmpDir } from './config'
 import { ensureDirs, BASE_DIR, APP_DIR_NAME, DATA_ROOT } from './paths'
 import { logger } from './logger'
 import { pollPeriodMs } from './performance'
-import { reinstalled, updatedFrom, updateSplashHtml } from './updated'
+import { reinstalled, takeUpdateFlag, updatedFrom, updateSplashHtml } from './updated'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent } from './tgws'
 import { announceUpdates, attachServices, broadcastAll, emit, registerIpc } from './ipc'
@@ -610,8 +610,13 @@ async function bootstrap(): Promise<void> {
   // не держит в памяти лишний интерфейс — а он появляется по первому щелчку по
   // иконке в трее (showWindow).
   const shouldShow = !configStore.get().general.startMinimized && !startedAtLogin()
-  const previous = updatedFrom()
-  const again = reinstalled()
+  // Сначала ключи — их передаёт сторож. Затем метка: установщик тоже умеет
+  // поднимать программу сам, и тогда ключей нет, а окно перехода человек всё
+  // равно должен увидеть. Метку пишет старая программа перед уходом на
+  // установку (см. writeUpdateFlag), устаревшую метку не принимаем.
+  const flag = takeUpdateFlag()
+  const previous = updatedFrom() || flag?.from || ''
+  const again = reinstalled() || flag?.reinstall === true
   // Переустановку показываем и тогда, когда версия не изменилась: программу
   // поставили заново, и человек должен это увидеть.
   if (previous && (again || previous !== app.getVersion())) {

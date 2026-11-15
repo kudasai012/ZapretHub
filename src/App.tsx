@@ -139,6 +139,7 @@ export default function App() {
       onNavigate={setPage}
       onCollapse={(collapsed) => void save({ general: { sidebarCollapsed: collapsed } })}
       appUpdate={appUpdate}
+      onAppUpdate={(info) => setAppUpdate(info)}
       onShowRelease={() => setReleaseOpen(true)}
       progress={progressMinimized ? progress : null}
       onOpenProgress={() => setProgressMinimized(false)}
@@ -202,6 +203,7 @@ export default function App() {
         open={releaseOpen}
         onOpenChange={setReleaseOpen}
         t={t}
+        busy={progress?.target === 'app'}
       />
 
       <Toaster />

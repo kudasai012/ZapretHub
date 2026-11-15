@@ -138,4 +138,3 @@ export async function probeAll(): Promise<{ anyOk: boolean; results: Diagnostics
  * следующая копия winws успевала стартовать раньше и получить отказ.
  */
 export const PROBE_SETTLE_SECONDS = 1500
-export const START_CONFIRM_SECONDS = 800

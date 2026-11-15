@@ -8,7 +8,13 @@ import {
   RotateCcw,
   Trash2
 } from 'lucide-react'
-import type { AppConfig, AppUpdateInfo, ComponentKey, HomeState, UpdateInfo } from '@shared/contract'
+import type {
+  AppConfig,
+  AppUpdateInfo,
+  ComponentKey,
+  HomeState,
+  UpdateInfo
+} from '@shared/contract'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'

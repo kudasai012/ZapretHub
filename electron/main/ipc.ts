@@ -221,11 +221,26 @@ export function registerIpc(): void {
         'start',
         key === 'zapret' ? 'Не удалось включить zapret' : 'Не удалось включить TG WS Proxy',
         result.reason || 'причина не названа',
-        key
+        // В окне показываем и то, что успел сказать сам winws: по одной
+        // общей фразе не понять, что именно не так, а строки из журнала
+        // сразу называют причину.
+        winwsTail(key) || key
       )
       return fail(result.reason)
     }
+    // Запуск удался, но с оговоркой: например, winws жив, а фильтр не
+    // подтвердил. Провал не показываем — обход работает, — но промолчать
+    // про это нельзя, иначе человек будет искать поломку там, где её нет.
+    if (result.reason) emit('toast', { kind: 'warning', text: result.reason })
     return ok()
+  }
+
+  /** Последние строки winws — их и показываем, когда zapret не поднялся. */
+  function winwsTail(key: ComponentKey): string {
+    if (key !== 'zapret') return ''
+    const lines = services.zapret.outputTail()
+    if (lines.length === 0) return ''
+    return `winws:\n${lines.join('\n')}`
   }
 
   ipcMain.handle('process:start', (_event, key: ComponentKey) => startOne(key))
@@ -240,7 +255,7 @@ export function registerIpc(): void {
     const z = await services.zapret.start()
     const t = await services.tgws.start()
     broadcastAll()
-    if (!z.ok) notice('start', 'Не удалось включить zapret', z.reason || 'причина не названа', 'zapret')
+    if (!z.ok) notice('start', 'Не удалось включить zapret', z.reason || 'причина не названа', winwsTail('zapret') || 'zapret')
     if (!t.ok) notice('start', 'Не удалось включить TG WS Proxy', t.reason || 'причина не названа', 'tgws')
     const reasons = [z.reason, t.reason].filter(Boolean)
     return z.ok || t.ok ? ok(reasons.join('; ')) : fail(reasons.join('; ') || 'ничего не запустилось')

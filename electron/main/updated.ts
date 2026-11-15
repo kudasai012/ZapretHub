@@ -54,6 +54,70 @@ export function updatedFrom(argv: string[] = process.argv): string {
 }
 
 /**
+ * Метка «программу только что переставили».
+ *
+ * Окно перехода раньше видел только тот запуск, который сделал наш сторож: он
+ * и передавал программе ключ с прежней версией. Но установщик (ключ
+ * `--force-run`) поднимает программу и сам — уже без ключа; сторож видит, что
+ * программа работает, и больше её не трогает. Окно перехода пропадало ровно в
+ * этом случае, а он не редкий.
+ *
+ * Поэтому метку пишет старая программа перед тем, как уйти на установку, а та,
+ * что поднялась — кто бы её ни поднял — читает метку и показывает переход.
+ */
+export const FLAG_TTL_MS = 15 * 60 * 1000
+
+/** Где лежит метка. */
+export function updateFlagPath(): string {
+  // Модули просим внутри:updated.ts читается и до создания окна, и из сторожа.
+  const os = require('node:os') as typeof import('node:os')
+  const path = require('node:path') as typeof import('node:path')
+  return path.join(os.tmpdir(), 'ZapretHub.Updated.flag')
+}
+
+/**
+ * Кладёт метку: программу сейчас переставят, прежняя версия известна.
+ *
+ * Пишем до установки: после неё старой программы уже нет, а установщику про
+ * прежнюю версию ничего не известно.
+ */
+export function writeUpdateFlag(fromVersion: string, reinstall: boolean): boolean {
+  try {
+    const fs = require('node:fs') as typeof import('node:fs')
+    const body = { from: fromVersion, reinstall, at: Date.now() }
+    fs.writeFileSync(updateFlagPath(), JSON.stringify(body), 'utf8')
+    return true
+  } catch {
+    // Метка — не главное: без неё окна не будет, но установка всё равно идёт.
+    return false
+  }
+}
+
+/**
+ * Читает метку и сразу стирает её.
+ *
+ * Одноразовая: иначе окно «вас обновили» показывалось бы и при каждом
+ * следующем запуске. Устаревшую метку не принимаем — это, скорее всего,
+ * установка, которую прервали.
+ */
+export function takeUpdateFlag(): { from: string; reinstall: boolean } | null {
+  try {
+    const fs = require('node:fs') as typeof import('node:fs')
+    const file = updateFlagPath()
+    if (!fs.existsSync(file)) return null
+    const raw = fs.readFileSync(file, 'utf8')
+    fs.rmSync(file, { force: true })
+    const parsed = JSON.parse(raw) as { from?: string; reinstall?: boolean; at?: number }
+    const at = Number(parsed?.at ?? 0)
+    if (!parsed?.from || !Number.isFinite(at)) return null
+    if (Date.now() - at > FLAG_TTL_MS) return null
+    return { from: String(parsed.from), reinstall: parsed.reinstall === true }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Окно перехода: что стоит сейчас и что было раньше.
  *
  * Страница собрана целиком из одного куска разметки: ни шрифтов, ни картинок

@@ -758,6 +758,19 @@ function ZapretPanel({
             </Select>
           </Section>
 
+          {/*
+            Перезапуск обхода — не мгновенный: сначала обход останавливается,
+            потом драйвер отдаёт фильтр, и только затем поднимается winws.
+            Без этой строки всё выглядело как зависшая программа: элементы
+            погашены, а что происходит — непонятно.
+          */}
+          {busy ? (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {t('common.restarting')}
+            </p>
+          ) : null}
+
           {/* Списки адресов: сначала выбираем файл, потом правим его. */}
           <Section
             icon={SECTION_ICONS.lists}

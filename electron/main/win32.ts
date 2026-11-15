@@ -410,7 +410,7 @@ export async function killOrphanGuardians(key: string): Promise<number[]> {
  */
 export async function releaseWinDivert(
   ownPids: Set<number> = new Set<number>(),
-  options: { stopTimeoutMs?: number; settleMs?: number } = {}
+  options: { stopTimeoutMs?: number; settleMs?: number; removeService?: boolean } = {}
 ): Promise<{ freed: boolean; killed: number[]; state: ServiceState }> {
   const stopTimeout = options.stopTimeoutMs ?? 8000
   const settle = options.settleMs ?? 5000
@@ -432,10 +432,17 @@ export async function releaseWinDivert(
 
   // 2. Служба драйвера: без этого старый драйвер остаётся в ядре даже тогда,
   //    когда процессов-владельцев уже нет.
+  //
+  //    Удаляем службу только когда об этом попросили отдельно. В горячем
+  //    пути удаление вредно: пока ядро не отдаст объекты драйвера, запись
+  //    остаётся «на удаление» (service marked for deletion, ошибка 1072), и
+  //    создать службу заново уже нельзя — WinDivertOpen не может ни открыть,
+  //    ни поставить драйвер, и обход не поднимается до перезагрузки. Такое
+  //    удаление и делало ошибку занятого фильтра вечной.
   for (const name of WINDIVERT_SERVICES) {
     await run('net', ['stop', name], stopTimeout)
     await run('sc', ['stop', name], stopTimeout)
-    await run('sc', ['delete', name], stopTimeout)
+    if (options.removeService) await run('sc', ['delete', name], stopTimeout)
   }
 
   // 3. Ждём, пока служба действительно отпустит фильтр, а не обещает это.
@@ -519,6 +526,9 @@ export async function enableTcpTimestamps(): Promise<boolean> {
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 const RUN_VALUE = 'ZapretHub'
 
+/** Имя задачи планировщика, которая поднимает программу при входе. */
+const TASK_NAME = 'ZapretHub'
+
 /** Пишет или убирает запись автозапуска в реестре пользователя. */
 /**
  * Ключ, с которым Windows поднимает программу при входе в систему.
@@ -539,23 +549,55 @@ export function startedAtLogin(): boolean {
   return process.argv.includes(LOGIN_ARG)
 }
 
+/**
+ * Автозапуск программы при входе в Windows.
+ *
+ * Раньше это была запись в Run: Windows поднимала программу обычными правами,
+ * она их не находила и перезапускалась через UAC. На деле это значило, что при
+ * каждом входе человек видел запрос повышения, а если не отвечал — не видел и
+ * самой программы: ни окна, ни иконки в трее, хотя тумблер был включён.
+ *
+ * Теперь автозапуск — задача планировщика с ключом `/rl highest`: согласие
+ * спрашивается один раз, когда тумблер включают, а дальше программа
+ * поднимается уже с правами администратора, без всяких окон, и сразу уходит в
+ * трей — ключ `--tray` уезжает в команде задачи.
+ *
+ * Прежнюю запись в Run не оставляем рядом, а убираем: иначе программа
+ * стартовала бы дважды. Если задачу создать не вышло (нет прав или старая
+ * Windows), пишем Run, как раньше, — пусть будет хоть так.
+ */
 export async function setAutostart(
   enabled: boolean,
   exePath: string,
   args: string = LOGIN_ARG
 ): Promise<boolean> {
   if (!IS_WINDOWS) return false
+  const command = `"${exePath}"${args ? ` ${args}` : ''}`
   if (!enabled) {
-    const result = await run('reg', ['delete', RUN_KEY, '/v', RUN_VALUE, '/f'])
-    return result.code === 0
+    await run('schtasks', ['/delete', '/tn', TASK_NAME, '/f'])
+    const removed = await run('reg', ['delete', RUN_KEY, '/v', RUN_VALUE, '/f'])
+    return removed.code === 0
   }
-  const value = `"${exePath}"${args ? ` ${args}` : ''}`
-  const result = await run('reg', ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', value, '/f'])
-  return result.code === 0
+  await run('reg', ['delete', RUN_KEY, '/v', RUN_VALUE, '/f'])
+  const task = await run(
+    'schtasks',
+    ['/create', '/tn', TASK_NAME, '/tr', command, '/sc', 'onlogon', '/rl', 'highest', '/f'],
+    20000
+  )
+  if (task.code === 0) return true
+  const fallback = await run(
+    'reg',
+    ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', command, '/f']
+  )
+  return fallback.code === 0
 }
 
 export async function autostartEnabled(): Promise<boolean> {
   if (!IS_WINDOWS) return false
+  // Задача — основной способ; запись в Run осталась у тех, у кого задача не
+  // создалась, и её тоже считаем автозапуском.
+  const task = await run('schtasks', ['/query', '/tn', TASK_NAME])
+  if (task.code === 0) return true
   const result = await run('reg', ['query', RUN_KEY, '/v', RUN_VALUE])
   return result.code === 0
 }

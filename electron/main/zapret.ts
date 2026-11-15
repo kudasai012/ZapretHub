@@ -17,13 +17,16 @@ import { logger } from './logger'
 import { ManagedProcess, STATUS_STOPPED } from './procman'
 import {
   enableTcpTimestamps,
+  holdsFilter,
   isAdmin,
   killForeignProcesses,
   killOrphanGuardians,
   pidsByName,
   queryService,
   releaseWinDivert,
-  removeService
+  removeService,
+  type ServiceState,
+  WINDIVERT_SERVICES
 } from './win32'
 
 export const SERVICE_NAME = 'zapret'
@@ -54,13 +57,51 @@ function listSortKey(name: string): [number, number, string] {
   return index === -1 ? [1, 0, name] : [0, index, name]
 }
 
-/** Разбор командной строки Windows: кавычки обрамляют токен и удаляются. */
+/**
+ * Разбор командной строки Windows: кавычки обрамляют токен и удаляются.
+ *
+ * Попутно снимается экранирование cmd: в .bat-файлах `!` пишут как `^!`
+ * (иначе cmd съест его сам — при включённой delayed expansion), `&` как `^&`,
+ * `|` как `^|`, а сам `^` как `^^`. Мы запускаем winws напрямую, без cmd, и
+ * раньше эти символы доходили до него буквально: `--dpi-desync-fake-tls=^!`
+ * winws принимал за имя файла с фейковым TLS и падал с «could not read ^!».
+ * Внутри кавычек `^` — обычный символ, так же как у cmd.
+ */
 export function tokenizeWindows(line: string): string[] {
   const tokens: string[] = []
   let current = ''
   let inQuotes = false
   let hasToken = false
-  for (const ch of line) {
+  let escaped = false
+  for (let at = 0; at < line.length; at += 1) {
+    const ch = line[at]
+    // Экранированный символ уходит в токен как есть: будь то кавычка, пробел,
+    // скобка или &.
+    if (escaped) {
+      current += ch
+      hasToken = true
+      escaped = false
+      continue
+    }
+    if (ch === '^' && !inQuotes) {
+      const next = line[at + 1]
+      // Каретка в конце строки — это перенос, а не экранирование: cmd съедает
+      // перевод строки, а не первый символ следующей. Съесть символ — значит
+      // склеить аргумент с чужой строкой и получить в аргументах текст справки
+      // winws вместо значения.
+      if (next === undefined) continue
+      /**
+       * Каретка перед процентом снимает его служебный смысл.
+       *
+       * cmd разбирает строку в два прохода: сначала подставляет переменные
+       * (`%%` → `%`, `%NAME%` → значение), потом снимает каретки. Поэтому
+       * `^%PATH^%` доезжает как `%PATH%`, а не разворачивается в путь.
+       * У нас тот же порядок — подстановка идёт раньше разбора, — значит
+       * снятая каретка ложной подстановки не вызовет.
+       */
+      escaped = true
+      continue
+    }
     if (ch === '"') {
       inQuotes = !inQuotes
       hasToken = true
@@ -87,9 +128,39 @@ const WINWS_KNOWN_FAILURES: [string, string][] = [
     'A copy of winws is already running with the same filter',
     'уже запущена другая копия winws с тем же фильтром — выключите zapret (или снимите службу) и повторите'
   ],
-  ['error opening filter', 'фильтр WinDivert занят прежней копией winws'],
-  ['could not read', 'winws не смог прочитать свои файлы — переустановите компонент zapret']
+  ['error opening filter', 'фильтр WinDivert занят прежней копией winws']
 ]
+
+/**
+ * Код выхода winws, когда фильтр WinDivert занят прежней копией.
+ *
+ * winws не всегда пишет про это в журнал: иногда он просто выходит с десяткой.
+ * Раньше такой выход показывался как «не удалось запустить» и повторов не
+ * было, хотя причина та же, что у «error opening filter», — фильтр ещё не
+ * отдали.
+ */
+export const WINDIVERT_BUSY_EXIT = 10
+
+/** Так Windows сообщает, что процесс снят извне: нашим сторожем или человеком. */
+const KILLED_EXIT_CODES = [0x40010004, 0xc000013a]
+
+/** winws не нашёл файл: «could not read ^!», «cannot access ipset file 'x'». */
+const MISSING_FILE = /(?:could not read|cannot (?:access|open)|could not open)\s+(.+?)\s*$/i
+
+/**
+ * Имя файла из жалобы winws.
+ *
+ * В кавычках — берём то, что в кавычках: «cannot access ipset file 'loaded'»
+ * — это про файл loaded, а не про строку целиком. Без кавычек берём хвост
+ * строки: «could not read ^!» — это про файл ^!.
+ */
+function missingFileName(line: string): string {
+  const found = MISSING_FILE.exec(line.trim())
+  if (!found) return ''
+  const rest = found[1].trim()
+  const quoted = /'([^']+)'/.exec(rest) ?? /"([^"]+)"/.exec(rest)
+  return (quoted ? quoted[1] : rest).trim()
+}
 
 /**
  * Причины, после которых имеет смысл попробовать ещё раз.
@@ -113,9 +184,6 @@ const BUSY_FILTER = /фильтр WinDivert занят|другая копия w
 const FILTER_HINT =
   'Программа убрала всё, что могла. Фильтр держит чужой обход (GoodbyeDPI, служба zapret) — снимите его в Диагностике или перезагрузите компьютер'
 
-/** Сколько ждём, пока ядро отпустит фильтр убитой копии winws. */
-const WINDIVERT_SETTLE_MS = 1200
-
 /** Сколько ждём после убийства чужого winws.exe. */
 const FOREIGN_KILL_SETTLE_MS = 900
 
@@ -125,9 +193,46 @@ const START_ATTEMPTS = 4
 /** На какой попытке снимаем службу драйвера, если процессы уже убраны. */
 const DRIVER_RELEASE_ATTEMPT = 2
 
-/** Человеческая причина провала по тому, что написал сам winws. */
-export function winwsFailureReason(output: string[]): string {
+/**
+ * Как часто спрашиваем, отдал ли драйвер фильтр.
+ *
+ * Процесс winws убит — но ядро снимает фильтр не в ту же миллисекунду:
+ * объекты драйвера ещё живут, и новый winws, запущенный в эту паузу,
+ * доходит до открытия фильтра и получает «error opening filter: The object
+ * is referenced by other objects so cannot be deleted». Именно из-за этого
+ * перезапуск при смене настройки (стоп, затем старт) падал всегда.
+ */
+const FILTER_POLL_MS = 400
+
+/** Сколько ждём, что драйвер отдаст фильтр сам, уже после остановки winws. */
+const FILTER_RELEASE_WAIT_MS = 3000
+
+/** Сколько ждём освобождения фильтра перед повтором (по номеру попытки). */
+const FILTER_RETRY_WAIT_MS = [1500, 3000, 6000]
+
+/** Сколько ждать освобождения фильтра перед повтором: 1.5, 3, 6 с. */
+function filterRetryWait(attempt: number): number {
+  return (
+    FILTER_RETRY_WAIT_MS[attempt - 1] ??
+    FILTER_RETRY_WAIT_MS[FILTER_RETRY_WAIT_MS.length - 1] * 2
+  )
+}
+
+/**
+ * Человеческая причина провала: сначала по тому, что написал сам winws, потом
+ * по коду выхода.
+ *
+ * Про «could not read ^!» раньше говорилось «переустановите компонент zapret».
+ * Это неправда: компонент цел, просто в аргументах указан файл, которого нет
+ * (чаще всего это cmd-экранирование, которое мы теперь снимаем сами). Поэтому
+ * имя файла показываем как есть, а переустанавливать не советуем.
+ */
+export function winwsFailureReason(output: string[], code?: number | null): string {
+  if (code === WINDIVERT_BUSY_EXIT) return 'фильтр WinDivert занят прежней копией winws'
+  if (code != null && KILLED_EXIT_CODES.includes(code)) return 'процесс снят извне — это не падение'
   for (const line of output) {
+    const missing = missingFileName(line)
+    if (missing) return `winws не нашёл файл, указанный в стратегии: ${missing}`
     for (const [needle, reason] of WINWS_KNOWN_FAILURES) {
       if (line.includes(needle)) return reason
     }
@@ -136,13 +241,63 @@ export function winwsFailureReason(output: string[]): string {
 }
 
 export const PROBE_SETTLE_SECONDS = 1500
-export const START_CONFIRM_SECONDS = 800
+
+/**
+ * Сколько следим за свежезапущенным winws, прежде чем сказать «запущен».
+ *
+ * Раньше ждали 800 мс и рапортовали успех — но winws иногда умирает на второй
+ * секунде (например, споткнувшись о файл из аргументов), и программа успевала
+ * показать «обход работает» там, где он уже упал. Теперь смотрим полторы
+ * секунды: отказ «A copy of winws is already running» приходит в первые сотни
+ * миллисекунд, а живой процесс спокойно доживает до конца окна.
+ */
+export const START_WATCH_MS = 1500
+
+/**
+ * Окно наблюдения при загруженном ipset-списке.
+ *
+ * ipset-список — это сотни килобайт: на холодном диске и под антивирусом
+ * winws читает его заметно дольше обычного и может написать про ошибку в
+ * файле только на третьей-четвёртой секунде. Короткое окно здесь опасно не
+ * тем, что объявит провалом рабочий запуск (живой процесс мы провалом не
+ * считаем), а тем, что пропустит позднюю смерть: программа успеет показать
+ * «обход работает» и тут же откатится.
+ */
+export const START_WATCH_LOADED_MS = 5000
+
+/** Сколько следим за запуском при выбранном ipset-режиме. */
+export function startWatchMs(ipsetMode?: string): number {
+  return ipsetMode === 'loaded' ? START_WATCH_LOADED_MS : START_WATCH_MS
+}
+
+/** Как часто спрашиваем, жив ли процесс, пока следим. */
+const WATCH_STEP_MS = 120
+
+/** Сколько строк вывода winws показываем человеку. */
+const OUTPUT_TAIL = 5
+
+/**
+ * Чем winws сообщает, что перехват пошёл.
+ *
+ * Эту строку он пишет последней — после загрузки всех списков и ipset:
+ * «windivert initialized. capture is started.». То есть это признак не
+ * «процесс стартовал», а «фильтры применены», и ждать надо именно её, а не
+ * просто доживать окно.
+ */
+const READY_MARKER = /windivert initialized|capture is started/i
+
+/** Подтвердил ли winws, что capture запущен. */
+export function readySeen(lines: string[]): boolean {
+  return lines.some((line) => READY_MARKER.test(line))
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 export class ZapretComponent {
   private proc: ManagedProcess | null = null
   private reason = ''
+  /** Последние строки winws — их показываем человеку при провале. */
+  private tail: string[] = []
 
   // ------------------------------------------------------------ пути
 
@@ -237,14 +392,21 @@ export class ZapretComponent {
     return raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
   }
 
-  /** Склеивает строки, продолженные символом ^, в одну команду. */
+  /**
+   * Склеивает строки, продолженные символом ^, в одну команду.
+   *
+   * Каретка в конце строки гасит сам перевод строки, а не добавляет пробел:
+   * `echo a^` + перенос + `b` в cmd печатает `ab`, а не `a b`. Поэтому
+   * склеиваем без разделителя — иначе длинное значение, разорванное на две
+   * строки, превратилось бы в два аргумента.
+   */
   private static joinContinuations(lines: string[]): string[] {
     const joined: string[] = []
     let buffer = ''
     for (const line of lines) {
       const stripped = line.replace(/\s+$/, '')
       if (stripped.endsWith('^')) {
-        buffer += stripped.slice(0, -1) + ' '
+        buffer += stripped.slice(0, -1)
         continue
       }
       buffer += stripped
@@ -262,7 +424,12 @@ export class ZapretComponent {
       const match = /^\s*set\s+"?([A-Za-z_][A-Za-z0-9_]*)=(.*?)"?\s*$/i.exec(line)
       if (!match) continue
       const name = match[1].toUpperCase()
-      let value = match[2].trim().replace(/%~dp0/gi, `${this.dir}${path.sep}`)
+      // %% в батнике — это просто символ процента, и гасится он сразу, при
+      // чтении самой строки set: `set "A=50%%"` кладёт в переменную 50%.
+      let value = match[2]
+        .trim()
+        .replace(/%%/g, '%')
+        .replace(/%~dp0/gi, `${this.dir}${path.sep}`)
       if (path.sep !== '\\') value = value.replace(/\\/g, path.sep)
       variables[name] = value
     }
@@ -271,11 +438,66 @@ export class ZapretComponent {
     return variables
   }
 
-  private static expand(text: string, variables: Record<string, string>): string {
-    return text.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (whole, name: string) => {
-      const upper = name.toUpperCase()
-      return upper in variables ? variables[upper] : whole
-    })
+  /**
+   * Подстановка переменных: %BIN%, %LISTS% и прочие из пакета.
+   *
+   * Считаем слева направо, а не одной подстановкой: `%%` в батнике — это
+   * просто символ процента, и его надо съесть раньше, чем он склеится с
+   * соседней переменной (`%%BIN%%` — не переменная BIN, а `%BIN%` в тексте).
+   *
+   * Неизвестную переменную не трогаем: молча подставить пустоту — значит
+   * потерять аргумент, и человек будет искать поломку там, где её нет. Такие
+   * места называем в журнале.
+   */
+  private static expand(
+    text: string,
+    variables: Record<string, string>
+  ): { text: string; unknown: string[] } {
+    let out = ''
+    const unknown: string[] = []
+    let at = 0
+    while (at < text.length) {
+      const ch = text[at]
+      if (ch !== '%') {
+        out += ch
+        at += 1
+        continue
+      }
+      if (text[at + 1] === '%') {
+        out += '%'
+        at += 2
+        continue
+      }
+      /**
+       * Ссылка на параметр: `%~dp0`, `%~1`, `%~nx0`.
+       *
+       * Закрывающего процента у неё нет, поэтому её надо съесть всю сразу.
+       * Иначе этот процент спарится со следующим в строке, и подстановка
+       * поедет по всей команде: `--literal=100%%` останется с двумя
+       * процентами, а `%LISTS%` не подставится вовсе.
+       */
+      const param = /^%~[a-z]*\d*/i.exec(text.slice(at))
+      if (param) {
+        out += param[0]
+        at += param[0].length
+        continue
+      }
+      const end = text.indexOf('%', at + 1)
+      if (end === -1) {
+        out += ch
+        at += 1
+        continue
+      }
+      const name = text.slice(at + 1, end).toUpperCase()
+      if (name in variables) {
+        out += variables[name]
+      } else {
+        out += text.slice(at, end + 1)
+        if (!/^~/.test(name)) unknown.push(`%${name}%`)
+      }
+      at = end + 1
+    }
+    return { text: out, unknown: [...new Set(unknown)] }
   }
 
   /** Значения %GameFilterTCP% / %GameFilterUDP% по логике service.bat. */
@@ -308,8 +530,19 @@ export class ZapretComponent {
     for (const command of commands) {
       const stripped = command.trim()
       if (!stripped.toLowerCase().startsWith('start')) continue
-      const expanded = ZapretComponent.expand(stripped, variables)
-      const tokens = tokenizeWindows(expanded)
+      // %~dp0 разворачиваем заранее: в set-строках это делается при чтении,
+      // а в строке запуска — здесь, до подстановки переменных.
+      const expanded = ZapretComponent.expand(
+        stripped.replace(/%~dp0/gi, `${this.dir}${path.sep}`),
+        variables
+      )
+      for (const name of expanded.unknown) {
+        this.log(`в стратегии ${strategy} осталась неизвестная переменная ${name} — оставил как есть`)
+      }
+      if (expanded.text.includes('%')) {
+        this.log(`в стратегии ${strategy} после подстановки остался символ % — проверьте файл`)
+      }
+      const tokens = tokenizeWindows(expanded.text)
       const exeIndex = tokens.findIndex((token) => token.toLowerCase().endsWith('winws.exe'))
       if (exeIndex === -1) continue
       const exe = path.isAbsolute(tokens[exeIndex])
@@ -562,8 +795,80 @@ export class ZapretComponent {
    * Отдельно от start(), потому что при занятом фильтре WinDivert запуск нужно
    * повторить, а ManagedProcess одноразовый — зато его можно создать заново.
    */
+  /** Чужие копии winws: те, что живут в системе, но не наши. */
+  private async strangeWinws(): Promise<number[]> {
+    const own = this.ownPids()
+    const pids = await pidsByName('winws')
+    return pids.filter((pid) => !own.has(pid))
+  }
+
+  /**
+   * Кто сейчас держит фильтр WinDivert: чужие копии winws и служба драйвера.
+   */
+  private async filterState(): Promise<{ pids: number[]; state: ServiceState }> {
+    const own = this.ownPids()
+    const pids = (await pidsByName('winws')).filter((pid) => !own.has(pid))
+    const states = await Promise.all(WINDIVERT_SERVICES.map((name) => queryService(name)))
+    return { pids, state: states.find(holdsFilter) ?? 'NOT_FOUND' }
+  }
+
+  /**
+   * Ждём, пока драйвер отдаст фильтр.
+   *
+   * Нужны оба признака: чужих копий winws нет и служба драйвера не держит
+   * фильтр (остановлена или её нет вовсе). Одного «процессов нет» мало —
+   * драйвер остаётся в ядре и после смерти последнего владельца, и ровно в
+   * этом зазоре новый winws натыкался на занятый фильтр.
+   */
+  private async waitForFilterFree(budgetMs: number): Promise<{ free: boolean; waited: number }> {
+    const startedAt = Date.now()
+    for (;;) {
+      const { pids, state } = await this.filterState()
+      if (pids.length === 0 && !holdsFilter(state)) {
+        return { free: true, waited: Date.now() - startedAt }
+      }
+      const left = budgetMs - (Date.now() - startedAt)
+      if (left <= 0) return { free: false, waited: Date.now() - startedAt }
+      await sleep(Math.min(FILTER_POLL_MS, left))
+    }
+  }
+
+  /**
+   * Дожимаем фильтр сразу после остановки своего winws.
+   *
+   * Смена стратегии, списка или игрового фильтра перезапускает обход: стоп,
+   * потом старт. Раньше старт начинался, едва исчезал процесс winws, — и
+   * упирался в фильтр, который ядро ещё не отдало. Теперь ждём здесь, в
+   * остановке: следующий запуск начинается на чистом фильтре, а не надеется
+   * на повторы, каждый из которых стоит секунды и показывает ошибку.
+   */
+  private async releaseAfterStop(): Promise<void> {
+    const quick = await this.waitForFilterFree(FILTER_POLL_MS)
+    if (quick.free) return
+    const before = await this.filterState()
+    this.log(
+      `фильтр WinDivert занят после остановки (служба ${before.state}, копий winws: ${before.pids.length}) — снимаю службу драйвера`
+    )
+    // Удалять службу нельзя: до тех пор, пока ядро не отдаст объекты, запись
+    // остаётся «на удаление» (service marked for deletion), и создать её
+    // заново уже не выйдет — обход не поднимется до перезагрузки компьютера.
+    await releaseWinDivert(this.ownPids(), { stopTimeoutMs: 3000, settleMs: 2000 })
+    const after = await this.waitForFilterFree(FILTER_RELEASE_WAIT_MS)
+    if (after.free) {
+      this.log(`фильтр WinDivert отпустил через ${after.waited} мс`)
+    } else {
+      const stuck = await this.filterState()
+      this.log(`фильтр WinDivert не отдали: служба ${stuck.state}, копий winws: ${stuck.pids.length}`)
+    }
+  }
+
   private async spawnWinws(parsed: { exe: string; args: string[] }): Promise<{ ok: boolean; reason: string }> {
     const output: string[] = []
+    const startedAt = Date.now()
+    this.tail.length = 0
+    // Код выхода запоминаем: по нему виден занятый фильтр и снятый извне
+    // процесс — то, чего в журнале winws может и не быть.
+    let exitCode: number | null = null
     this.proc = new ManagedProcess({
       key: 'zapret',
       command: parsed.exe,
@@ -572,11 +877,16 @@ export class ZapretComponent {
       logName: 'zapret.log',
       onLog: (line) => {
         output.push(line)
+        this.tail.push(line)
+        if (this.tail.length > OUTPUT_TAIL * 4) this.tail.shift()
         logger.writeTo('zapret.log', line)
       },
       // Причину падения разбираем по выводу winws: «A copy of winws is
       // already running» понятнее, чем «код выхода 1».
-      crashReason: (lines) => winwsFailureReason(lines),
+      crashReason: (lines, code) => winwsFailureReason(lines, code),
+      onExit: (code) => {
+        exitCode = code
+      },
       onStatus: (status) => {
         if (status === 'crashed') {
           this.reason = this.proc?.currentReason || winwsFailureReason(output) || 'процесс завершился'
@@ -587,16 +897,68 @@ export class ZapretComponent {
     })
     this.proc.start()
 
-    // winws подтверждает работу через пару сотен миллисекунд: раньше этого
-    // срока отказ «A copy of winws is already running» уже пришёл бы.
-    await sleep(START_CONFIRM_SECONDS)
-    if (this.proc.currentStatus === 'crashed') {
+    /**
+     * Смотрим за процессом до конца окна, а не один раз через паузу.
+     *
+     * Умер — отвечаем сразу, не дожидаясь конца: отказ из-за занятого фильтра
+     * приходит в первые сотни миллисекунд, и ждать остаток окна незачем.
+     */
+    const window = startWatchMs(configStore.get().zapret.ipsetMode)
+    const deadline = Date.now() + window
+    while (Date.now() < deadline) {
+      const status = this.proc.currentStatus
+      if (status === 'crashed') {
+        return {
+          ok: false,
+          reason: winwsFailureReason(output, exitCode) || this.proc.currentReason || 'процесс завершился'
+        }
+      }
+      if (status === 'stopped') return { ok: false, reason: 'процесс снят до подтверждения запуска' }
+      // Маркер — основной сигнал: он приходит после загрузки всех списков.
+      // Дожидать окна до конца незачем, и запуск подтверждается быстрее.
+      if (readySeen(output)) {
+        this.log(`фильтр поднят за ${Date.now() - startedAt} мс`)
+        return { ok: true, reason: '' }
+      }
+      await sleep(Math.min(WATCH_STEP_MS, Math.max(0, deadline - Date.now())))
+    }
+
+    const status = this.proc.currentStatus
+    if (status === 'crashed') {
       return {
         ok: false,
-        reason: winwsFailureReason(output) || this.proc.currentReason || 'процесс завершился'
+        reason: winwsFailureReason(output, exitCode) || this.proc.currentReason || 'процесс завершился'
       }
     }
-    return { ok: true, reason: '' }
+    if (readySeen(output)) {
+      this.log(`фильтр поднят за ${Date.now() - startedAt} мс`)
+      return { ok: true, reason: '' }
+    }
+    /**
+     * Живой, но без маркера.
+     *
+     * Процесс не упал — значит, провала нет и повторять запуск нельзя (две
+     * копии дерутся за один фильтр). Но и «работает» говорить рано: winws не
+     * дошёл до строки «windivert initialized», то есть либо не загрузил
+     * списки, либо фильтр не поднялся. Это конкретная диагностика, а не
+     * гадание, поэтому её показываем.
+     */
+    const silent = output.length === 0
+    this.reason = silent
+      ? `обход запущен, но winws не написал ни строки за ${Math.round(window / 1000)} с — списки, вероятно, не загрузились`
+      : `обход запущен, но winws не подтвердил фильтр за ${Math.round(window / 1000)} с — перехват мог не начаться`
+    this.log(`${this.reason} (последнее, что сказал: ${output.slice(-1)[0] ?? 'ничего'})`)
+    return { ok: true, reason: this.reason }
+  }
+
+  /**
+   * Последние строки, которые успел сказать winws.
+   *
+   * Человеку показываем сырой вывод: пересказ «переустановите компонент»
+   * скрывал, что именно не так, и люди переустанавливали то, что не сломано.
+   */
+  outputTail(): string[] {
+    return this.tail.slice(-OUTPUT_TAIL)
   }
 
   async start(): Promise<{ ok: boolean; reason: string }> {
@@ -662,9 +1024,11 @@ export class ZapretComponent {
     for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
       const started = await this.spawnWinws(parsed)
       if (started.ok) {
-        this.reason = ''
+        // Причина при удачном запуске бывает: процесс жив, но не подтвердил
+        // фильтр. Молчать про это нельзя, поэтому причина едет дальше.
+        this.reason = started.reason
         this.log(`запущен за ${Date.now() - startedAt} мс`)
-        return { ok: true, reason: '' }
+        return { ok: true, reason: this.reason }
       }
       this.reason = started.reason
       this.log(`не запустился: ${started.reason}`)
@@ -677,9 +1041,23 @@ export class ZapretComponent {
       // его держал.
       await this.killForeign()
 
+      // Твёрдое правило: пока в системе жив хоть один чужой winws, вторую
+      // копию не запускаем. Две копии с одним фильтром — это как раз «exit
+      // code 10» и та самая гонка, из-за которой обход не поднимался.
+      const strangers = await this.strangeWinws()
+      if (strangers.length > 0) {
+        this.reason = `в системе уже работает winws (PID ${strangers.join(', ')}) — второй не запускаю`
+        this.log(`${this.reason}: две копии дерутся за один фильтр`)
+        return { ok: false, reason: this.reason }
+      }
+
       if (released || attempt < DRIVER_RELEASE_ATTEMPT) {
-        this.log(`фильтр WinDivert ещё занят — попытка ${attempt} из ${START_ATTEMPTS}, повторяю`)
-        await sleep(WINDIVERT_SETTLE_MS)
+        // Ждём не просто паузу, а освобождения: пока драйвер держит фильтр,
+        // следующая попытка всё равно упрётся в ту же ошибку.
+        const waited = await this.waitForFilterFree(filterRetryWait(attempt))
+        this.log(
+          `фильтр WinDivert ещё занят — попытка ${attempt} из ${START_ATTEMPTS}, ждал ${waited.waited} мс`
+        )
         continue
       }
 
@@ -695,16 +1073,33 @@ export class ZapretComponent {
           ? `фильтр WinDivert освобождён (снято копий winws: ${freed.killed.length})`
           : `фильтр WinDivert не отдали: служба ${freed.state}`
       )
-      await sleep(WINDIVERT_SETTLE_MS)
+      const waited = await this.waitForFilterFree(filterRetryWait(attempt))
+      this.log(`после снятия службы драйвера ждал ${waited.waited} мс`)
     }
     this.log(`запуск не удался за ${Date.now() - startedAt} мс: ${this.reason}`)
-    return { ok: false, reason: `${this.reason}. ${FILTER_HINT}` }
+    /**
+     * Что говорить, зависит от того, кто держит фильтр.
+     *
+     * Служба, застрявшая посреди остановки, — это не чужой обход: драйвер не
+     * отдаёт свои объекты, и ждать бесполезно. Раньше на оба случая говорили
+     * одно и то же («снимите чужой обход»), и человек искал GoodbyeDPI там,
+     * где проблема была в собственном драйвере.
+     */
+    const last = await this.filterState()
+    const hint =
+      last.state === 'STOP_PENDING'
+        ? 'Служба драйвера WinDivert застряла посреди остановки — поможет перезагрузка компьютера'
+        : FILTER_HINT
+    return { ok: false, reason: `${this.reason}. ${hint}` }
   }
 
   async stop(): Promise<{ ok: boolean; reason: string }> {
+    const wasRunning = this.proc !== null
     await this.proc?.stop()
     this.proc = null
     this.reason = ''
+    // Ждём только свой фильтр: чужой мы не гасили и гасить не должны.
+    if (wasRunning) await this.releaseAfterStop()
     return { ok: true, reason: '' }
   }
 

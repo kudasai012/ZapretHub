@@ -21,7 +21,7 @@ import { BACKUPS_DIR } from './paths'
 import { configStore, dueForCheck, tmpDir } from './config'
 import { emit } from './ipc'
 import { logger } from './logger'
-import { relaunchArgs } from './updated'
+import { relaunchArgs, writeUpdateFlag } from './updated'
 import { ZapretComponent } from './zapret'
 import { TgWsComponent, EXE_NAME } from './tgws'
 
@@ -555,6 +555,9 @@ export function reinstallKind(latest: string, current: string): ReinstallKind {
  * сторож, он же передаёт ей версию, с которой её ставили.
  */
 export async function reinstallApp(): Promise<ReinstallResult> {
+  if (programUpdating) {
+    return { ok: true, message: 'установка уже идёт', kind: 'reinstall', info: null }
+  }
   const current = app.getVersion()
   const release = await latestRelease(APP_REPO)
   if (!release) {
@@ -604,13 +607,37 @@ export async function reinstallApp(): Promise<ReinstallResult> {
 }
 
 /**
+ * Установщик программы уже запущен.
+ *
+ * Пока он работает, старая программа ещё жива: установщик гасит её не сразу.
+ * В эти секунды кнопку обновления в свёрнутом окне можно нажать второй раз,
+ * и поверх первой установки пойдёт вторая. Раньше это было видно как
+ * непонятная ошибка установки — теперь повторный запуск просто не начинается.
+ */
+let programUpdating = false
+
+/** Можно ли ещё раз запустить установку программы. */
+export function programUpdateRunning(): boolean {
+  return programUpdating
+}
+
+/**
  * Ставит скачанный установщик тихо и ставит сторожа.
  *
  * @param reinstall это переустановка той же версии, а не обновление: тогда
  *   окно перехода показывает версию без стрелки.
  */
-function runInstaller(target: string, fromVersion: string, reinstall: boolean): void {
+/**
+ * Пуск установщика: наружу, чтобы стенд мог проверить весь путь, а не только
+ * отдельные его куски.
+ */
+export function runInstaller(target: string, fromVersion: string, reinstall: boolean): void {
   const { spawn } = require('node:child_process') as typeof import('node:child_process')
+  // Метку кладём заранее: после установки этой программы уже не будет, а
+  // установщику про прежнюю версию ничего не известно. По метке окно перехода
+  // покажет и та программа, которую поднял сам установщик, — сторож в этом
+  // случае её не трогает и ключа она не получает.
+  writeUpdateFlag(fromVersion, reinstall)
   const setup = spawn(target, ['/S', '--force-run'], {
     detached: true,
     stdio: 'ignore',
@@ -620,6 +647,9 @@ function runInstaller(target: string, fromVersion: string, reinstall: boolean): 
   // Сторожа ставим по номеру запущенного установщика: ждать по имени он
   // будет вечно, если имя в выводе tasklist окажется обрезанным.
   if (!setup.pid) return
+  // Считаем установку начавшейся только теперь: не запустился установщик —
+  // значит, программа не обновляется и кнопку гасить незачем.
+  programUpdating = true
   spawnRelaunchGuard({
     installerPid: setup.pid,
     installerName: path.basename(target).replace(/\.exe$/i, ''),
@@ -638,6 +668,7 @@ function runInstaller(target: string, fromVersion: string, reinstall: boolean): 
  * поставит новую версию.
  */
 export async function applyAppUpdate(): Promise<{ ok: boolean; message: string }> {
+  if (programUpdating) return { ok: true, message: 'установка уже идёт' }
   const release = await latestRelease(APP_REPO)
   if (!release) return { ok: false, message: 'не удалось получить релиз' }
   const files = assets(release)

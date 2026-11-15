@@ -76,7 +76,8 @@ export interface ManagedOptions {
    * знает свои сообщения, поэтому причина разбирается у него, а в журнал
    * попадает уже понятная строка.
    */
-  crashReason?: (output: string[]) => string
+  /** Причина падения по выводу процесса и коду выхода. */
+  crashReason?: (output: string[], code: number | null) => string
   restartOnCrash?: boolean
   restartDelayMs?: number
   /**
@@ -332,7 +333,7 @@ export class ManagedProcess {
    * пусть сыро, но видно, на чём он споткнулся.
    */
   private crashReason(code: number | null): string {
-    const parsed = this.options.crashReason?.(this.tail.slice()) ?? ''
+    const parsed = this.options.crashReason?.(this.tail.slice(), code) ?? ''
     if (parsed) return parsed
     const last = this.tail.filter((line) => line.trim() !== '').slice(-1)[0]?.trim() ?? ''
     const exit = `код выхода ${code ?? '—'}`
